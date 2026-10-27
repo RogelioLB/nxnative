@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- nxnative for Android: a NativeActivity app; the host is lib/arm64-v8a/libdmhost.so (dm/android/front_android.c), the touch controls and the text box are in classes.dex (dm/android/java) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.nxnative.android" android:versionCode="1" android:versionName="0.1">
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true"/>
+    <uses-feature android:glEsVersion="0x00030000"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <application android:label="nxnative" android:hasCode="true" android:extractNativeLibs="true"
+        android:appCategory="game" android:isGame="true" android:resizeableActivity="false">
+        <!-- simpleperf from adb shell (CPU profiles of the replay on the phone); no cost at run time -->
+        <profileable android:shell="true"/>
+        <activity android:name="android.app.NativeActivity" android:exported="false" android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
+            <meta-data android:name="android.app.lib_name" android:value="dmhost"/>
+        </activity>
+        <!-- the settings screen before the game (dm/android/java Launcher.java): the app's entry; Play starts the NativeActivity -->
+        <activity android:name="org.nxnative.android.Launcher" android:exported="true"
+            android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

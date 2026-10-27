@@ -93,6 +93,7 @@ static pthread_mutex_t g_cq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 static void cq_popped(void) { pthread_mutex_lock(&g_cq_mu); pthread_cond_broadcast(&g_cq_cv); pthread_mutex_unlock(&g_cq_mu); }
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
+static int audio_ahead(void);   // DM_AUDIO_PACE (below)
 static void render_main(void *arg) {
     (void)arg;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
@@ -112,6 +113,7 @@ static void render_main(void *arg) {
         const int16_t *src; int got;
         uint32_t h = atomic_load(&g_cq_head);
         if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); cq_popped(); }   // play queued catch-up output first
+        else if (audio_ahead()) { src = NULL; got = 0; }   // DM_AUDIO_PACE=game: silence instead of the next frame while the audio is ahead of the game
         else { g_frame_n = 0; exec(g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
@@ -303,6 +305,8 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
                 dst[s] = (int16_t)v; loud |= (uint64_t)v;
             }
             atomic_fetch_add(&g_frames, 1); if (loud) atomic_fetch_add(&g_nonsilent, 1);
+            { static uint64_t f0, t0; uint64_t f1 = atomic_load(&g_frames), t1 = now_ns();   // the audio clock against real time: 5 ms a frame (1.00 when the renderer keeps time)
+              if (!t0) { f0 = f1; t0 = t1; } else if (f1 - f0 >= 2000) { LOG("audren: %llu frames in %.2f s of real time: audio clock rate %.3f", (unsigned long long)(f1 - f0), (t1 - t0) / 1e9, (f1 - f0) * 5e6 / (double)(t1 - t0)); f0 = f1; t0 = t1; } }
             uint64_t f = atomic_load(&g_frames); if (f == 200 || f % 12000 == 0) LOG("audren: rendered %llu frames, %llu of them not silent", (unsigned long long)f, (unsigned long long)atomic_load(&g_nonsilent));
             return (int)nout;
         }
@@ -313,6 +317,22 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_updates, g_renders, g_catchups;
+// DM_AUDIO_PACE=game: the audio clock is held to the game's own time (presents x their vsyncs x 1/60 s) when the game runs slower than real time. A game whose actors step a
+// fixed amount per frame but whose scripted sequences follow the music (Super Mario Bros. Wonder's Piranha Plants on Parade) otherwise has the music, and the sequence with it,
+// run ahead of the camera on a device that cannot hold 60 fps. The sound then plays only as fast as the game (silence fills the rest). While nothing is presented for 300 ms
+// (loading) the audio runs free and the reference is taken again. Off by default: a diagnosis and a stopgap, not a fix (the fix is holding the frame rate)
+_Atomic uint64_t dm_game_vsyncs, dm_game_present_ns;
+static int audio_ahead(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_AUDIO_PACE"); on = e && !strcmp(e, "game"); if (on) LOG("audren: DM_AUDIO_PACE=game: the audio clock follows the game's frames"); }
+    if (!on) return 0;
+    static uint64_t base_r, base_v; static int based; static uint64_t held;
+    uint64_t v = atomic_load(&dm_game_vsyncs), r = atomic_load(&g_renders), t = now_ns(), p = atomic_load(&dm_game_present_ns);
+    if (!based || !p || t - p > 300000000ull || r < base_r || v < base_v) { base_r = r; base_v = v; based = 1; return 0; }
+    double audio_ms = (double)(r - base_r) * 5.0, game_ms = (double)(v - base_v) * (1000.0 / 60.0);
+    if (audio_ms > game_ms + 60.0) { if (!(held++ % 2000)) LOG("audren: audio held to the game's time (%.0f ms ahead; %llu frames held so far)", audio_ms - game_ms, (unsigned long long)held); return 1; }
+    if (game_ms > audio_ms + 1000.0) { base_r = r; base_v = v; }   // the game ahead of the audio (it never is for long): no debt kept
+    return 0;
+}
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
 //   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
 //   and the mutex UpdateImpl holds is at +0x2d0 (+0x1f0 in SDK 16). The layout is recognized by the presence of the Span version of GenerateCommand
@@ -413,7 +433,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     static Result (*orig)(void *, void *, size_t, void *, size_t, const void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
     static uint64_t last_r = ~0ull;
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&g_renders);
-    if (last_r != ~0ull && r == last_r) {
+    if (last_r != ~0ull && r == last_r && !audio_ahead()) {
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&g_cq_tail);

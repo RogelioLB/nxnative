@@ -197,7 +197,7 @@ static void ownership(void) {
     assert(!pages(0, alias, P) && !pages(1, alias, P));
     assert(*(uint8_t *)(alias + P) == 0x34);
     memset((void *)(stack + P), 0x76, 2 * P);
-    readonly_base = alias; readonly_size = memory_getpagesize();
+    readonly_size = memory_getpagesize(); readonly_base = (alias + P) & ~(uintptr_t)(readonly_size - 1);   // the host page the copy-back starts in (alias's own on 16 KiB pages)
     assert(!mprotect((void *)readonly_base, readonly_size, PROT_READ));
     assert(!unmap(stack + P, alias + P, 2 * P) && !readonly_size);
     for (size_t i = P; i < 3 * P; ++i) assert(((uint8_t *)alias)[i] == 0x76);
@@ -222,10 +222,12 @@ static void module_sources(void) {
     g_mod[0] = (module_t){.base=b, .size=0x20000, .text_end=0x2800, .ro_off=0x2800,
         .data_off=0x3000, .patch_off=0x1e000, .key_page_off=0x8000, .key_page_size=0x4000, .loaded=1};
     g_nmod = 1;
-    assert(!mprotect(b, 0x4000, PROT_READ));
+    uintptr_t rx = (0x2800 + dm_code_page_mask()) & ~dm_code_page_mask();   // the loader's text seal (loader.c map_image): 0x4000 on 16 KiB pages, 0x3000 on 4 KiB
+    assert(!mprotect(b, rx, PROT_READ));
     assert(!mprotect(b + 0x8000, 0x4000, PROT_READ));
     assert(!mprotect(b + 0x1c000, 0x4000, PROT_READ));
-    assert(map(stack, (uintptr_t)b + 0x3000, P) == BAD);
+    if (rx > 0x3000) assert(map(stack, (uintptr_t)b + 0x3000, P) == BAD);   // data sealed with the text's last host page
+    else { assert(!map(stack, (uintptr_t)b + 0x3000, P)); assert(!unmap(stack, (uintptr_t)b + 0x3000, P)); }   // its own page: writable data
     assert(map(stack, (uintptr_t)b + 0x7000, 2 * P) == BAD);
     assert(map(stack, (uintptr_t)b + 0x1b000, 2 * P) == BAD);
     assert(!map(stack, (uintptr_t)b + 0x4000, P));

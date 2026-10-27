@@ -45,7 +45,7 @@ typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t 
 // GLboolean and other arguments narrower than 32 bits are taken as uint32_t and truncated here (hle.h: Switch callers do not extend them)
 #define GL(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                            \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section(DM_SECT("swhle")))) static const hle_ent e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 #define BIGSTUB(fn)                                                                              \
     extern const char fn##_bs[];                                                                 \
@@ -54,12 +54,12 @@ typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t 
 #define GLB(name, ret, ...)                                                                      \
     static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
     BIGSTUB(h_##name);                                                                           \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
+    __attribute__((used, section(DM_SECT("swhle")))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
     static ret h_##name(__VA_ARGS__)
 #define EGL(name, ret, ...)                                                                      \
     static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
     BIGSTUB(h_##name);                                                                           \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
+    __attribute__((used, section(DM_SECT("swhle")))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
     static ret h_##name(__VA_ARGS__)
 
 // ---------- GL enums ----------

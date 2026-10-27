@@ -591,7 +591,8 @@ int main(void) {
         for (int i = 0; i < 3; i++) { eb_[0x10800 + i] ^= 0x5a; GPU_READ_EQ_E(5, "a write beside the texture: still version 5"); }
         mtl_pkg_stats(&up, &re);
         EXPECT("writes beside the texture: no re-upload", 0, re - re0);
-        EXPECT("writes beside the texture: found clean three times", 3, mtl_pkg_edge_skips() - es0);
+        // the write 2 KB before the texture shares its host page only on pages over 4 KB (16 KB on Apple silicon); on 4 KB pages it never touches the texture's pages
+        EXPECT("writes beside the texture: found clean three times", getpagesize() > 0x1000 ? 3 : 0, mtl_pkg_edge_skips() - es0);
         FILLPAT(6); nvn_swizzle(&dd, 0, 0, lin, 64, store);
         GPU_READ_EQ_E(6, "a write into the texture's own bytes in that page: version 6");
         mtl_pkg_stats(&up, &re); EXPECT("a write into the texture: re-upload +1", 1, re - re0);

@@ -1,0 +1,49 @@
+# Packs the Android app (no Gradle): the manifest linked by aapt2, lib/arm64-v8a/libdmhost.so, classes.dex from dm/android/java (javac, then d8), the self test in assets/selftest
+# (the synthetic module of dm/android/tests/selftest_nso.py, rewritten with DM_TARGET=android), page-aligned by zipalign, signed by apksigner.
+# Usage: build_apk.py --sdk <Android SDK> --so <libdmhost.so> --selftest <folder of main.patched.bin, main.fixups.tsv, ...> [--demo <folder>] --keystore <.jks> -o <out.apk>
+#   [--build-tools 36.0.0] [--platform android-35]
+# The keystore is made on first use (keytool, a debug key: alias nxnative, password "android"); keep it outside the repository.
+import argparse, os, shutil, subprocess, sys, tempfile, zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+def run(*a):
+    r = subprocess.run(a, capture_output=True, text=True, errors='replace')
+    if r.returncode: sys.exit(f'{a[0]} failed ({r.returncode}):\n{r.stdout}{r.stderr}')
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--sdk', required=True); ap.add_argument('--so', required=True); ap.add_argument('--selftest', required=True)
+    ap.add_argument('--demo', help='folder for assets/demo: the synthetic shaders and their SPIR-V (tests/synth_shaders.py, tools/spv_android.py)')
+    ap.add_argument('--keystore', required=True); ap.add_argument('-o', '--out', required=True)
+    ap.add_argument('--build-tools', default='36.0.0'); ap.add_argument('--platform', default='android-35')
+    a = ap.parse_args()
+    bt = os.path.join(a.sdk, 'build-tools', a.build_tools); exe = '.exe' if os.name == 'nt' else ''; bat = '.bat' if os.name == 'nt' else ''
+    jar = os.path.join(a.sdk, 'platforms', a.platform, 'android.jar')
+    if not os.path.exists(a.keystore):
+        run('keytool', '-genkeypair', '-keystore', a.keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'nxnative',
+            '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=nxnative debug')
+    with tempfile.TemporaryDirectory() as d:
+        base = os.path.join(d, 'base.apk')
+        run(os.path.join(bt, 'aapt2' + exe), 'link', '-o', base, '--manifest', os.path.join(HERE, '..', 'apk', 'AndroidManifest.xml'), '-I', jar,
+            '--min-sdk-version', '29', '--target-sdk-version', '34')
+        # the Java side (the touch controls, the text box): javac for Java 8 against the platform's android.jar, then d8 to classes.dex
+        src = os.path.join(HERE, '..', 'java'); cls = os.path.join(d, 'classes'); os.makedirs(cls)
+        javas = [os.path.join(r, f) for r, _, fs in os.walk(src) for f in fs if f.endswith('.java')]
+        run('javac', '-source', '8', '-target', '8', '-Xlint:-options', '-encoding', 'UTF-8', '-bootclasspath', jar, '-d', cls, *javas)
+        run(os.path.join(bt, 'd8' + bat), '--lib', jar, '--min-api', '29', '--output', d, *[os.path.join(r, f) for r, _, fs in os.walk(cls) for f in fs if f.endswith('.class')])
+        with zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
+            z.write(os.path.join(d, 'classes.dex'), 'classes.dex')
+            z.write(a.so, 'lib/arm64-v8a/libdmhost.so')
+            n = 0
+            for f in sorted(os.listdir(a.selftest)):
+                if f.startswith('main.'): z.write(os.path.join(a.selftest, f), f'assets/selftest/{f}'); n += 1
+            if not n: sys.exit(f'no self test module (main.*) in {a.selftest}')
+            for f in sorted(os.listdir(a.demo)) if a.demo else []: z.write(os.path.join(a.demo, f), f'assets/demo/{f}')
+        aligned = os.path.join(d, 'aligned.apk')
+        run(os.path.join(bt, 'zipalign' + exe), '-f', '-P', '16', '4', base, aligned)
+        run(os.path.join(bt, 'apksigner' + bat), 'sign', '--ks', a.keystore, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', a.out, aligned)
+    print(f'{a.out}: {os.path.getsize(a.out):,} bytes')
+
+if __name__ == '__main__':
+    main()

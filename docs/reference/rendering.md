@@ -890,3 +890,70 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### GL movies decoded by the SDK's movie library
 
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): the USM movies' H.264 is decoded through the SDK's movie library (the host's decoder) into NV12 buffers (3,110,400 bytes a 1920x1080 frame); the game uploads the planes into a `GL_RED` and a `GL_RG` texture (two `glTexSubImage2D` a frame) and converts YUV in its own shader (in `main`, `SamplerY` / `SamplerUV`).
+
+## Android Vulkan replay
+
+The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw.inc`, shaders post-processed by `dm/android/tools/spv_android.py`; see [dm/android/README.md](../../dm/android/README.md)). Found on a POCO X5 5G (Adreno 619, Vulkan 1.1.128).
+
+### Dynamic vector components in uniform buffers on the Adreno
+
+- **Symptom:** menus and title screens drawn as vertical stripes: each textured quad shows one line of its texture stretched over its height.
+- **Cause:** the translator reads constant buffer words as `cb[0][w >> 2][w & 3]`, an access chain whose last index picks a vec4 component with a value. Nintendo's layout library reads its texture coordinates that way, and the Adreno 619 driver reads such a component wrong (v came out as u, the texture read along its diagonal).
+- **Fix:** `spv_android.py` `dyn_components` loads the whole vec4 and picks the component with `OpSelect` on the index (`ANDROID_CHAIN` 3). All 9,192 rewritten modules pass `spirv-val --target-env vulkan1.1`.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): vertex shader `16684efcf1fa7d8d` (every layout pane). Found with `DM_VK_DUMP` (every pass's targets written out) and the shader's disassembly.
+
+### Plain char is unsigned on Android
+
+- **Symptom:** sparkling noise on lit surfaces and bright broken lines inside soft shapes (clouds), wherever a signed normal map is sampled.
+- **Cause:** AArch64 Linux makes plain `char` unsigned; Apple arm64, where the host and its third-party code were written, makes it signed. `bcdec` reads BC4 / BC5 SNORM endpoints through `(char)`, so negative endpoints became 128..255 and every signed normal map decoded to noise (the Adreno has no BC: they are decoded on the CPU).
+- **Fix:** the Android build compiles everything with `-fsigned-char` (`dm/android/CMakeLists.txt`).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): its normal maps are BC5 SNORM (`R8G8_SNORM` once decoded).
+
+### Render targets attached in their view's format
+
+- **Symptom:** the whole picture darker and more saturated than the Switch's.
+- **Cause:** the render pass attached each colour target in its image's format, ignoring the format of the view the game binds it with. Wonder's last pass writes its RGBA8 window texture through an RGBA8_SRGB view, so the linear values were stored unencoded (the same as [the Metal finding](../../dm/games/010015100B514000/README.md)).
+- **Fix:** `rp_prepare` makes the attachment view in `view_format` (the images of uncompressed colour formats are mutable).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
+
+### Replay syncs limited to what is read
+
+- **Symptom:** low frame rate with the GPU and the CPU both mostly idle; the render thread waiting in `view_` / `submit_wait`.
+- **Cause:** a draw or dispatch after any pending GPU write to guest memory (a storage buffer a shader wrote, copied back when the chunk completes) submitted the chunk and waited for the GPU, whatever it read. Uniform buffer updates and small copies did the same.
+- **Fix:** `draw_view` / `mem_view` compare the ranges a draw, dispatch or CPU write touches (vertex streams, indices, uniform slots, storage buffers, indirect arguments) with the pending write-backs and queued copies, and sync only on an overlap. Vertex streams a dispatch of the same chunk wrote are bound from the dispatch's own arena copy (`fwd_find`) instead of waiting for them. The `[vk] guest reads of draws` and `syncs by site` lines count what still waits.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): about one sync per draw after the first storage-buffer write of a frame; a compute shader writes a few hundred bytes of vertices once a frame.
+
+### Render passes kept over CPU-side commands
+
+- **Symptom:** hundreds of render passes a frame on the same targets; on a tiler GPU each loads and stores its attachments.
+- **Cause:** every command other than a draw ended the render pass, among them uniform buffer updates, which the replay does on the CPU; full clears ran outside passes (`vkCmdClearColorImage` and a full barrier, then the pass loaded the result).
+- **Fix:** CPU-side commands (uniform updates, buffer copies and fills, events, counters, fences) and clears leave the pass open; full clears of a target the size of the pass use `vkCmdClearAttachments` in it.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): 403 passes in a level frame, 234 of them on the same two 960×540 targets (a uniform update before nearly every draw); about 60 after.
+
+### Indices not read back from write-combined memory
+
+- **Symptom:** over half of the render thread's time in the index copy of `vk_draw`.
+- **Cause:** the vertex range of an indexed draw was computed by reading back the indices just written to the arena, which is host-visible write-combined memory (uncached reads).
+- **Fix:** the range is taken from the indices as they are written; storage buffer snapshots are copied from guest memory, not from the arena.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): 78 → 27 ms of replay CPU a frame in a level.
+
+### Pipeline keys built from the state objects' fields
+
+- **Symptom:** new graphics pipelines made all through play, also in a level seen before (a few per frame, about 1 to 2 ms each on the Adreno); the start-up list of pipelines grew past 186,000 keys over a few sessions, and making it again took the fast cores for most of an hour.
+- **Cause:** `bind_state` copies the game's state objects whole, and the key took the colour, polygon, blend and depth / stencil states as copied: the bits their fields leave over (16 of colour's 32, 24 of polygon's, 18 of each blend's 64, 25 of depth / stencil's) hold whatever the game's object held, since the game fills objects on its stack without `SetDefaults`. Also in the key: blend enables of targets the pass does not have, and which of the three polygon offsets is on.
+- **Fix:** the key takes each state field by field over zeroed bits, masks the blend enables to the pass's targets and keeps one depth-bias switch. The start-up list makes at most its first 3,000 pipelines (`DM_VK_PREWARM`), compiles them without the replay's lock and keeps no repeats.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): 418 pipelines in a session after the fix, none made while playing a level.
+
+### Long passes sent to the GPU in pieces
+
+- **Symptom:** the game waits for the GPU (SyncWait about 12 ms a wait) after the replay has recorded the frame, though the GPU's own work is shorter than a frame.
+- **Cause:** a chunk went to the GPU only at a change of render targets, and most of a frame is two passes of about 140 draws each: the GPU started each one only when the CPU had recorded all of it.
+- **Fix:** a chunk of 64 draws is submitted before the next draw, in the middle of a pass; the pass is begun again with its targets loaded (passes load and store their attachments).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): SyncWait 12.5 → 5 ms a wait, a level from about 25 to 30 fps at render scale 0.8.
+
+### Constant buffers copied only as far as the shader reads
+
+- **Symptom:** frames with many effects at 18 fps; memcpy and memcmp at the top of the render thread's profile.
+- **Cause:** every draw copied each bound constant buffer whole (up to 64 KB, six or seven a shader): the translator declares every buffer as 4096 vec4, so the size bound was all the replay knew.
+- **Fix:** at shader load, `spv_cb_ext` takes the largest constant element index of the access chains on each buffer's variable (a variable index or any other use keeps the whole buffer), and a draw copies that much; the copies are shared within a chunk when the bytes are the same (`ucopy`).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): its scene shaders read 64 bytes to 2.3 KB of each buffer; levels with many effects held 30 fps at render scale 0.8.

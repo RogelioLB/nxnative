@@ -30,6 +30,22 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
 #define MAX_MOD 128   // the profile's modules (up to 8) and the NROs a game loads at run time (Super Smash Bros. Ultimate: 98)
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
+// Signal context registers (crash reports, probes, the GC pause): Darwin's mcontext is a pointer to its thread / NEON / exception states;
+// the Android build defines the same accessors over Linux's sigcontext (dm/android/compat/dm_android.h)
+#ifdef __APPLE__
+#define DM_SS(uc) ((uc)->uc_mcontext->__ss)
+#define DM_NS(uc) ((uc)->uc_mcontext->__ns)
+#define DM_UC_ESR(uc) ((uc)->uc_mcontext->__es.__esr)
+#define DM_SECT(name) "__DATA," name
+#endif
+// Symbol names in inline assembly: Mach-O prefixes C symbols with an underscore and hides them with .private_extern; ELF uses the plain name and .hidden
+#ifdef __APPLE__
+#define DM_SYM(n) "_" n
+#define DM_HIDDEN ".private_extern "
+#else
+#define DM_SYM(n) n
+#define DM_HIDDEN ".hidden "
+#endif
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;
@@ -75,6 +91,27 @@ extern int g_nmod;
 static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
 // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
 extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+// The page the loader seals the text's read-only + execute range to (and memory queries report it by): 16 KB on Apple silicon; the system's page on
+// Android (4 KB on most devices), so that data sharing the text's last 16 KB stays writable there
+#ifdef __ANDROID__
+#include <unistd.h>
+static inline uint64_t dm_code_page_mask(void) { return (uint64_t)getpagesize() - 1; }
+#else
+static inline uint64_t dm_code_page_mask(void) { return 0x3FFF; }
+#endif
+// Reading and writing those slots. Apple: pthread TSD, which rewritten code finds at tpidrro_el0 + 8 * key. Android: a per-thread block that x18 points
+// into (Linux preserves x18; the host is built with x18 reserved), the slots below x18 and a shadow call stack above it for system code built with
+// one (dm/android/plat_android.c); rewritten code finds a slot at x18 + its key page value (patch_nso.py DM_TARGET=android)
+#ifdef __ANDROID__
+void *dm_slot_get(pthread_key_t k);
+void dm_slot_set(pthread_key_t k, const void *v);
+void dm_slots_thread_init(void);   // give the calling thread its slot block and point x18 at it (idempotent)
+int64_t dm_slot_keypage_value(pthread_key_t k);
+void dm_slots_x18_restore(void);   // x18 back to the value bionic gave the calling thread, before it returns into frames that may use a shadow call stack
+#else
+#define dm_slot_get pthread_getspecific
+#define dm_slot_set pthread_setspecific
+#endif
 
 void load_modules(const char *dir, const char **names, int n);
 void run_module_inits(void);

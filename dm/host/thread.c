@@ -10,8 +10,16 @@ static pthread_once_t g_keyown_once = PTHREAD_ONCE_INIT;
 static void own_free(void *p) { void **own = p; free(own[0]); free(own[1]); free(own); }
 static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) die("cannot create the free key for thread-local blocks"); }
 void guest_thread_init(void) {
-    pthread_setspecific(g_keygate, (void *)dm_gate);
-    pthread_setspecific(g_key18, 0);
+#ifdef __ANDROID__
+    dm_slots_thread_init();   // the slots live in the block x18 points into (dm.h)
+    // In an app process the runtime (ART) blocks signals on the threads it makes, and threads inherit their creator's mask: the GC pause (SIGUSR2, hle_thread.c),
+    // the crash and dirty-page handlers and the watchdog (crash.c), the suspension of hang reports (plat_android.c thread_suspend) must reach guest threads
+    { sigset_t s; sigemptyset(&s); int sig[] = {SIGUSR2, SIGALRM, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT, dm_android_suspend_signal()};
+      for (unsigned i = 0; i < sizeof sig / sizeof *sig; i++) sigaddset(&s, sig[i]);
+      pthread_sigmask(SIG_UNBLOCK, &s, NULL); }
+#endif
+    dm_slot_set(g_keygate, (void *)dm_gate);
+    dm_slot_set(g_key18, 0);
     // The TLS block and the thread-local region are freed when the thread exits. The guest overwrites the slots of the TLS / thread-local-region keys (it sets its own thread pointer), so they cannot be freed by the current value in the key:
     // the raw pointers that were allocated are recorded separately on this file's own key g_keyown and freed by its destructor (key destructors run at pthread_exit, like crash.c's signal alternate stack; the destructor only calls free, which is safe on a guest thread's small stack too).
     // They used not to be freed: every short-lived thread the game started leaked 8192 + 0x200 + 0x400 = 9728 bytes. The thread-local region and the current thread object are one block (the SDK may also overwrite the TLR[0x1f8] slot)
@@ -21,7 +29,7 @@ void guest_thread_init(void) {
     own[0] = calloc(1, TLS_SIZE); own[1] = tlr;
     if (!own[0]) die("guest thread TLS block allocation failed");
     *(void **)(tlr + 0x1f8) = tlr + TLR_SIZE;               // current thread object
-    pthread_setspecific(g_keytls, own[0]); pthread_setspecific(g_keytlr, tlr);
+    dm_slot_set(g_keytls, own[0]); dm_slot_set(g_keytlr, tlr);
     void **prev = pthread_getspecific(g_keyown); if (prev) own_free(prev);   // re-initialised on the same thread: free the previous set first (the new one is what the slots now point to)
     pthread_setspecific(g_keyown, own);
 }

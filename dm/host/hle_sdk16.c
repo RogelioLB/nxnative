@@ -241,6 +241,7 @@ static void *vsync_thread(void *arg) {
         if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
         if (!vsync_tick(v)) break;
+        { static uint64_t n, t0; uint64_t t1 = now_ns(); if (!t0) t0 = t1; else if (++n == 600) { LOG("vsync: 600 events in %.2f s of real time: rate %.3f of %.0f Hz", (t1 - t0) / 1e9, 600.0 * (double)period / (double)(t1 - t0), hz); n = 0; t0 = t1; } }
         next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
     }
     free(v); return NULL;

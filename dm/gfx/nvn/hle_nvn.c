@@ -64,12 +64,12 @@ typedef struct { const char *name; void *fn; } nvn_impl;
 #define NVN(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                             \
     static const NVNT_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section(DM_SECT("swnvn")))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 // Newer interfaces without prototypes: no signature check
 #define NVN_NOPROTO(name, ret, ...)                                                               \
     static ret h_##name(__VA_ARGS__);                                                             \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section(DM_SECT("swnvn")))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 
 static int g_log;
@@ -664,6 +664,10 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    { static _Atomic uint64_t n, ns, acq, lag; uint64_t d = now_ns() - t0, k = atomic_fetch_add(&n, 1) + 1; atomic_fetch_add(&ns, d); if (o->fenced == 2) atomic_fetch_add(&acq, 1);
+      atomic_fetch_add(&lag, mtl_last_fence() - o->fence);   // submissions made since the fence: 0 = waits for the newest
+      if (!(k & 255)) LOG("[nvn] SyncWait blocked %llu times: mean %.2f ms, window acquires %llu, mean submissions behind the newest %.2f", (unsigned long long)k, (double)atomic_load(&ns) / 1e6 / (double)k,
+                         (unsigned long long)atomic_load(&acq), (double)atomic_load(&lag) / (double)k); }
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -944,6 +948,8 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
+    static int tw = -1, th, nt; if (tw < 0) { const char *e = getenv("DM_NVN_SIZE_TRACE"); tw = 0; if (e) sscanf(e, "%dx%d", &tw, &th); }   // DM_NVN_SIZE_TRACE: who sets a viewport of that size
+    if (tw && n > 0 && v[2] == tw && v[3] == th && nt++ < 40) { LOG("nvn size trace: viewport %gx%g at %g,%g from %p", v[2], v[3], v[0], v[1], __builtin_return_address(0)); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
@@ -1292,6 +1298,17 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait 
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
+#if DM_ANDROID
+// The fence of each window texture's last present: an acquired texture is free once the commits before its own last present completed, as a Switch swapchain
+// image is released after the frame that drew it, not after everything submitted. With the newest fence (as below for Apple) Super Mario Bros. Wonder's next
+// frame waited for the GPU to finish the one just presented (253 of 256 blocking SyncWaits were window acquires, 22 ms each), so the CPU and the GPU took turns
+static struct { const void *w; uint64_t f[4]; } g_win_pf[4];
+static uint64_t *win_pfence(const void *w) {
+    for (int i = 0; i < 4; i++) if (g_win_pf[i].w == w) return g_win_pf[i].f;
+    for (int i = 0; i < 4; i++) if (!g_win_pf[i].w) { g_win_pf[i].w = w; return g_win_pf[i].f; }
+    return NULL;
+}
+#endif
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
     *idx = o->ntex ? o->next++ % o->ntex : 0;
@@ -1319,7 +1336,12 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+#if DM_ANDROID
+    static int safe = -1; if (safe < 0) safe = getenv("DM_VK_SAFE") != NULL;   // DM_VK_SAFE: the replay's earlier syncs, to bisect a regression (gfx_vk.c vk_safe)
+    if (s) { uint64_t *pf = safe ? NULL : win_pfence(w); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = pf && *idx >= 0 && *idx < 4 ? pf[*idx] : mtl_last_fence(); }
+#else
+    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }
+#endif   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -1741,6 +1763,10 @@ static void fstep_tick(const win_t *o, int c) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    { extern _Atomic uint64_t dm_game_vsyncs, dm_game_present_ns; atomic_fetch_add(&dm_game_vsyncs, (uint64_t)(o->interval > 0 ? o->interval : 1)); atomic_store(&dm_game_present_ns, now_ns()); }   // the game's own time (hle_audren.c DM_AUDIO_PACE)
+#if DM_ANDROID
+    { uint64_t *pf = win_pfence(w); if (pf && idx >= 0 && idx < 4) pf[idx] = mtl_last_fence(); }   // the commits that drew this texture (acquire above)
+#endif
     dm_fps_lock_tick();
     int c = fps_step_cap();
     if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (__atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) ? " (prerendered movie)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
@@ -2076,7 +2102,12 @@ NVN(nvnSamplerCompare, NVNboolean, const NVNsampler *a, const NVNsampler *b) {
 }
 
 // Texture builder / texture / view
-NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1; }
+// DM_NVN_SIZE_TRACE=<w>x<h> (diagnostic): the 2D sizes the game describes (256x128 and up), with its call chain for that size (where a game sizes its render targets)
+NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) {
+    TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1;
+    static int tw = -1, th, n; if (tw < 0) { const char *e = getenv("DM_NVN_SIZE_TRACE"); tw = 0; if (e) sscanf(e, "%dx%d", &tw, &th); }
+    if (tw && w >= 256 && h >= 128 && n++ < 400) { LOG("nvn size trace: %dx%d", w, h); if (w == tw && h == th) dm_backtrace((uint64_t)__builtin_frame_address(0)); }
+}
 NVN(nvnTextureBuilderSetSize3D, void, NVNtextureBuilder *b, int w, int h, int d) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = d; }
 NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b, NVNtextureSwizzle r, NVNtextureSwizzle g, NVNtextureSwizzle bl, NVNtextureSwizzle a) {
     tex_builder_t *o = (tex_builder_t *)b; o->set_swz = 1; o->swz = (uint16_t)((r & 7) | (g & 7) << 3 | (bl & 7) << 6 | (a & 7) << 9);
@@ -2353,7 +2384,11 @@ NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrim
 }
 
 // Viewport / scissor / depth range: single and multiple forms
-NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; h_nvnCommandBufferSetViewports(c, 0, 1, v); }
+NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
+    float v[4] = {(float)x, (float)y, (float)w, (float)h}; h_nvnCommandBufferSetViewports(c, 0, 1, v);
+    static int tw = -1, th, nt; if (tw < 0) { const char *e = getenv("DM_NVN_SIZE_TRACE"); tw = 0; if (e) sscanf(e, "%dx%d", &tw, &th); }   // DM_NVN_SIZE_TRACE (see SetViewports)
+    if (tw && w == tw && h == th && nt++ < 40) { uint64_t *fp = __builtin_frame_address(0); LOG("nvn size trace: SetViewport %dx%d from %p", w, h, __builtin_return_address(0)); dm_backtrace(fp ? fp[0] : 0); }
+}
 NVN(nvnCommandBufferSetScissors, void, NVNcommandBuffer *c, int first, int n, const int *r) {
     if (first == 0 && n >= 1) h_nvnCommandBufferSetScissor(c, r[0], r[1], r[2], r[3]);
     if (first + n > 1) ONCE_LOG("SetScissors first=%d n=%d: the host uses only index 0", first, n);

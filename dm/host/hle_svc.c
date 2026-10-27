@@ -19,6 +19,7 @@
 static uint8_t *g_as;              // ASLR region base = the whole block
 static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
+uint64_t dm_guest_heap_base(void) { return (uint64_t)(uintptr_t)g_heap; }   // probe.c: DM_PROBE_WATCH=heap+<offset> (the guest address space moves between runs on Android)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
@@ -186,7 +187,7 @@ static int map_source_busy(uint64_t addr, uint64_t size) { // g_map_lock held; n
         if (addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
     return 0;
 }
-// Loader text/patch seals use 16 KiB boundaries, independently of host page size.
+// Loader text seals use dm_code_page_mask (16 KiB on Apple, the system page on Android); the patch area starts 64 KiB aligned.
 static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
                                 uint64_t *lo, uint64_t *hi, uint64_t *perm) {
     if (start >= end) return;
@@ -195,7 +196,7 @@ static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
     else { if (start > *lo) *lo = start; if (end < *hi) *hi = end; *perm &= ~UINT64_C(2); }
 }
 static void module_data_query(const module_t *m, uint64_t off, uint64_t *lo, uint64_t *hi, uint64_t *perm) {
-    module_readonly_run(off, 0, (m->text_end + 0x3fff) & ~UINT64_C(0x3fff), lo, hi, perm);
+    module_readonly_run(off, 0, (m->text_end + dm_code_page_mask()) & ~dm_code_page_mask(), lo, hi, perm);
     if (m->patch_off > 0) module_readonly_run(off, (uint64_t)m->patch_off & ~UINT64_C(0x3fff), m->size, lo, hi, perm);
     module_readonly_run(off, m->key_page_off, m->key_page_off + m->key_page_size, lo, hi, perm);
 }

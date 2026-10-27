@@ -28,11 +28,30 @@ static pthread_key_t key_value(unsigned i) {
     default: return g_keygate;
     }
 }
+#ifdef __ANDROID__
+// The slots are fixed places in the x18 block (dm.h): the "keys" are the slot numbers, and the key page holds each slot's offset from x18
+static void create_keys(void) {
+    g_key18 = KEY_K18; g_keytls = KEY_KTLS; g_keytlr = KEY_KTLR; g_keygate = KEY_KGATE;
+    LOG("thread slots in the x18 block: K18 %+lld KTLS %+lld KTLR %+lld KGATE %+lld", (long long)dm_slot_keypage_value(g_key18), (long long)dm_slot_keypage_value(g_keytls),
+        (long long)dm_slot_keypage_value(g_keytlr), (long long)dm_slot_keypage_value(g_keygate));
+}
+static uint64_t key_page_entry(unsigned i) { return (uint64_t)dm_slot_keypage_value(key_value(i)); }
+// K slot check: slot = x18 + its key page value, as the rewritten code reads it
+static void tsd_check(void) {
+    dm_slots_thread_init(); dm_slot_set(g_key18, (void *)0x1234);
+    uint64_t base; __asm__ volatile("mov %0, x18" : "=r"(base));
+    uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
+    if (*(uint64_t *)(base + off) != 0x1234) die("x18 slot layout mismatch");
+    dm_slot_set(g_key18, 0);
+    dm_slots_x18_restore();   // this loading thread goes back into bionic's frames: x18 is theirs again (a guest thread's x18 is set at its entry)
+}
+#else
 static void create_keys(void) {
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
         pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("cannot create the host key");
     LOG("key numbers K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", g_key18, g_keytls, g_keytlr, g_keygate);
 }
+static uint64_t key_page_entry(unsigned i) { return (uint64_t)key_value(i) * 8; }
 
 // K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
 static void tsd_check(void) {
@@ -42,6 +61,7 @@ static void tsd_check(void) {
     if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD layout mismatch");
     pthread_setspecific(g_key18, 0);
 }
+#endif
 
 static void build_symhash(module_t *m);
 static void parse_dynamic(module_t *m) {
@@ -188,7 +208,14 @@ static void read_layout(module_t *m, const char *dir) {
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
     char line[256], key[32]; unsigned long v; unsigned seen = 0;
+#ifdef __ANDROID__
+    const char *want = "android";
+#else
+    const char *want = "apple";
+#endif
+    char target[16] = "apple";   // outputs for Apple carry no TARGET line
     while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "# TARGET %15s", target) == 1) continue;
         if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
         if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
@@ -208,6 +235,7 @@ static void read_layout(module_t *m, const char *dir) {
         }
     }
     fclose(f);
+    if (strcmp(target, want)) die("%s: the module was rewritten for %s, this host is built for %s: rewrite it with DM_TARGET=%s dm/tools/patch_nso.py", path, target, want, want);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
@@ -242,7 +270,7 @@ static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
     uint64_t *page = (uint64_t *)(m->base + m->key_page_off);
     memset(page, 0, m->key_page_size);
-    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
+    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = key_page_entry(i);
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
     if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);
@@ -258,7 +286,7 @@ static void register_gates(module_t *m, const char *dir) {
             if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
         fclose(f);
     }
-    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, (unsigned long)g_key18, (unsigned long)g_keytls, (unsigned long)g_keytlr, (unsigned long)g_keygate);
 }
 
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
@@ -547,7 +575,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
-        uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+        uint64_t rx = (m->text_end + dm_code_page_mask()) & ~dm_code_page_mask();
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
@@ -557,7 +585,7 @@ static void map_image(module_t *m, const char *dir) {
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
-    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+    uint64_t rx = (m->text_end + dm_code_page_mask()) & ~dm_code_page_mask();
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
