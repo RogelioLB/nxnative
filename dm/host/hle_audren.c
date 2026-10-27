@@ -321,7 +321,7 @@ static _Atomic uint64_t g_updates, g_renders, g_catchups;
 // fixed amount per frame but whose scripted sequences follow the music (Super Mario Bros. Wonder's Piranha Plants on Parade) otherwise has the music, and the sequence with it,
 // run ahead of the camera on a device that cannot hold 60 fps. The sound then plays only as fast as the game (silence fills the rest). While nothing is presented for 300 ms
 // (loading) the audio runs free and the reference is taken again. Off by default: a diagnosis and a stopgap, not a fix (the fix is holding the frame rate)
-extern _Atomic uint64_t dm_game_vsyncs, dm_game_present_ns;   // hle_nvn.c QueuePresentTexture
+__attribute__((weak)) _Atomic uint64_t dm_game_vsyncs, dm_game_present_ns;   // written by hle_nvn.c QueuePresentTexture (its definition wins); weak so a test with only this file links
 static int audio_ahead(void) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_AUDIO_PACE"); on = e && !strcmp(e, "game"); if (on) LOG("audren: DM_AUDIO_PACE=game: the audio clock follows the game's frames"); }
     if (!on) return 0;
