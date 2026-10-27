@@ -8,10 +8,10 @@
 #      signed with ~/.android/nxnative-debug.jks (made on first use; every later build must use it to update the app); the button-icon font (make_ext_font.py)
 #   5. unless --no-push: install the APK with adb and copy the rewritten modules, the RomFS, any DLC and the translated shaders to the app's folder on the phone
 #   (the shaders: split as for iOS, translated to SPIR-V for the Vulkan replay by dm/android/tools/spv_build.py)
-#      (Android/data/org.nxnative.android/files/game/), with its icon, control data and default game language (game/defaults.txt) for the settings screen
+#      (Android/data/org.nxnative.android/files/game/; the RomFS as the extraction's RomFS.img), with its icon, control data and default game language (game/defaults.txt) for the settings screen
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c); the app opens on a settings screen (dm/android/java Launcher.java), then the game.
 # Needs: Python with lz4, capstone and fonttools, the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, os, shutil, subprocess, sys
+import argparse, os, subprocess, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -81,7 +81,7 @@ def build_shaders(sv, dirs, work, logs, env, g):
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. None when there are none"""
     if not sv: return None
     sh = work / 'shader'
-    try: bi.split_shaders(sys.executable, REPO, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g)   # its own stage
+    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g)   # its own stage
     except BuildError as e: bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
@@ -170,7 +170,7 @@ def main(argv):
     lang = bi.game_language(bi.language_code(a.language) or 'en-US', a.language != 'en-US', have_l)
     patched = work / f'patched_android_{pkg_ver}'
     g = bi.rewrite(sys.executable, REPO, game / 'ExeFS', patched, env, logs, g)
-    spv = build_shaders(sv, {v: (game if v == pkg_ver else bi.extract(nx, keys, ex, v, *picks[v], None, logs, g)) for v in sv}, work, logs, env, g)
+    spv = build_shaders(sv, {v: (game if v == pkg_ver else bi.extract(nx, keys, ex, v, picks[v][0], picks[v][1], None, logs, g)) for v in sv}, work, logs, env, g)
     bi.PROG.stage('Android host'); so, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env); bi.PROG.end(str(so))
     apk = nsp_dir / (Path(g.get('ipa') or f'{g.id}.ipa').stem + '.apk')
     bi.PROG.stage('APK')
@@ -179,7 +179,8 @@ def main(argv):
     font = button_font(work, logs, env)
     bi.PROG.end(str(apk))
     if a.no_push:
-        say(f'done: {apk}. On the phone: install it, then copy {patched} to {REMOTE}/game/code and {game / "RomFS"} to {REMOTE}/game/RomFS'); return
+        rom = bi.rfs.source(game)
+        say(f'done: {apk}. On the phone: install it, then copy {patched} to {REMOTE}/game/code and {rom} to {REMOTE}/game/{rom.name}'); return
     bi.PROG.stage('install and copy to the phone')
     a.serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
     try: adb(a.serial, 'install', '-r', apk, log=logs / 'adb_install.log')
@@ -194,7 +195,13 @@ def main(argv):
     push_dir(a.serial, patched, 'code', logs / 'adb_push_code.log')
     if spv: push_dir(a.serial, spv, 'spv', logs / 'adb_push_spv.log', sync=True)
     bi.PROG.set(step='RomFS (this takes a while for a large game)')
-    push_dir(a.serial, game / 'RomFS', 'RomFS', logs / 'adb_push_romfs.log', sync=True)   # --sync: a repeat push copies only what changed
+    rom = bi.rfs.source(game)   # the extraction's RomFS image (RomFS.img: the host reads it as it is, hle_fs.c), or a RomFS folder from an older extraction
+    if rom.is_file():
+        adb(a.serial, 'shell', 'rm', '-rf', f'{REMOTE}/game/RomFS')
+        adb(a.serial, 'push', '--sync', rom, f'{REMOTE}/game/RomFS.img', log=logs / 'adb_push_romfs.log')
+    else:
+        adb(a.serial, 'shell', 'rm', '-f', f'{REMOTE}/game/RomFS.img')
+        push_dir(a.serial, rom, 'RomFS', logs / 'adb_push_romfs.log', sync=True)   # --sync: a repeat push copies only what changed
     aoc = work / 'aoc'
     if aoc.is_dir(): push_dir(a.serial, aoc, 'aoc', logs / 'adb_push_aoc.log', sync=True)
     # the settings screen (dm/android/java Launcher.java): the game's icon and control data (name, languages), and its defaults (the language picked with --language);

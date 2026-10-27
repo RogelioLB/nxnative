@@ -1179,6 +1179,8 @@ void dm_gfx_suspend(int on) {
 // One submission at a time: the Metal replay keeps one command buffer and one upload batch for the submission in progress (nvn_mtl.m g_cb). Fire Emblem: Three Houses initializes two queues and
 // submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only
 // through syncs, so replaying the two queues' submissions in lock order is one valid order
+// The game's own time, for the audio clock (hle_audren.c DM_AUDIO_PACE=game): vsyncs its presents asked for, and when the last one came
+_Atomic uint64_t dm_game_vsyncs, dm_game_present_ns;
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     gfx_enter();
@@ -1763,7 +1765,7 @@ static void fstep_tick(const win_t *o, int c) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
-    { extern _Atomic uint64_t dm_game_vsyncs, dm_game_present_ns; atomic_fetch_add(&dm_game_vsyncs, (uint64_t)(o->interval > 0 ? o->interval : 1)); atomic_store(&dm_game_present_ns, now_ns()); }   // the game's own time (hle_audren.c DM_AUDIO_PACE)
+    { atomic_fetch_add(&dm_game_vsyncs, (uint64_t)(o->interval > 0 ? o->interval : 1)); atomic_store(&dm_game_present_ns, now_ns()); }   // the game's own time (hle_audren.c DM_AUDIO_PACE)
 #if DM_ANDROID
     { uint64_t *pf = win_pfence(w); if (pf && idx >= 0 && idx < 4) pf[idx] = mtl_last_fence(); }   // the commits that drew this texture (acquire above)
 #endif
