@@ -1,3 +1,67 @@
+# nxnative for Android (fork)
+
+This repository is a **fork** of [seedds/nxnative](https://github.com/seedds/nxnative): a copy of the original project, kept on its own account, where the Android port was
+developed. nxnative runs Nintendo Switch games natively (the game's own ARM64 code, rewritten only where the host requires it) on the iPhone and the Mac; this fork adds
+**Android phones**. The changes are offered back to the original project as a pull request; everything below the line is the original project's README, unchanged.
+
+**Tested:** Super Mario Bros. Wonder 1.2.1 on a POCO X5 5G (Snapdragon 695, Adreno 619 GPU, Android 14). Other games and phones have not been tried.
+
+## Playing your own copy
+
+nxnative ships no game. You need **your own** dump of a game you own and the keys of **your own** Switch; downloaded game files are not supported.
+
+1. **Dump your game and keys** on your Switch: the game as NSP / XCI files (for example with nxdumptool: the base game and, if you have it, its update) and your `prod.keys`
+   (Lockpick_RCM). Put the game's files in one folder on your computer.
+2. **Install the tools** on the computer (Windows, macOS or Linux): Python 3.12 with `lz4`, `capstone` and `fonttools` (`pip install lz4 capstone fonttools`), the .NET SDK 10,
+   the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass `--sdk`), `adb`, and a JDK (for `keytool` and `javac`).
+3. **Connect the phone** with USB debugging on (or wireless debugging), and check that `adb devices` lists it.
+4. **Pack and install:**
+
+   ```
+   python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"
+   ```
+
+   It extracts the newest version in the folder (`-p v0` picks the base game), rewrites the game's code for Android, translates its shaders to SPIR-V, builds the app
+   (`<folder>/<name>.apk`), installs it and copies the game files to the phone (`Android/data/org.nxnative.android/files/game/`). The first run takes a while (the shaders
+   and the RomFS). `--no-push` builds the APK only; `-l es-419` (or another code or name) picks the default game language. Only games with a profile in `dm/games/` are packed.
+5. **Play:** open **nxnative** on the phone. A settings screen shows the game's icon and its settings; tap **Play**.
+
+**Settings** (remembered between runs): console mode (handheld is lighter), game language, game timing (*Game time* keeps levels timed to the music in step with the
+picture when the phone runs the game below its frame rate; the music can stutter), render scale (Mario: 0.5 to 1.0 of the game's 3D resolution; 0.8 holds 30 fps on the
+Adreno 619), the frame-rate counter, game rumble and its strength. Lines like `DM_RENDER_SCALE=0.8` in `Android/data/org.nxnative.android/files/env.txt` win over the
+screen. Saves stay in the app's own storage; the log is `Android/data/org.nxnative.android/files/log.txt`.
+
+The first time a scene appears the app makes its graphics pipelines (short stutters); it remembers them for the next start.
+
+## What was done to run on Android
+
+The iOS / Mac host runs the game's code natively and answers the Switch system calls and SDK services; graphics go through Metal. On Android the same host runs, with:
+
+- **The host on Android** (`dm/android`): a NativeActivity app (`front_android.c`); the Darwin APIs the host uses are emulated by compatibility headers (`dm/android/compat`);
+  the guest's thread slots go through the x18 register (the rewriter emits `mov xN, x18` for `DM_TARGET=android`).
+- **NVN on Vulkan** (`gfx_vk.c`, `gfx_vk_draw.inc`): a replay of the game's NVN command buffers on Vulkan: textures (BC formats decoded on the CPU where the GPU lacks them),
+  copies, clears, draws, compute, indirect draws, transform feedback, occlusion queries and GPU timestamps, submitted in chunks so the GPU works while the CPU records.
+  Shaders are translated with the project's translator and post-processed for Android drivers (`tools/spv_android.py`).
+- **Audio, movies, input:** AAudio, MediaCodec (H.264 / AAC), touch controls drawn over the game (2D / 3D layouts), physical controllers, rumble and the motion sensor.
+- **Settings screen** (`java/.../Launcher.java`) before the game, as on iOS.
+- **Packing script** `scripts/build_android_from_nsp.py`.
+
+Problems found on the way, each with its cause and fix in [docs/reference/rendering.md](docs/reference/rendering.md#android-vulkan-replay) and
+[docs/reference/audio.md](docs/reference/audio.md):
+
+- Vertical stripes: the Adreno driver misreads dynamic vector components in uniform buffers; shaders are rewritten to load the whole vector and select.
+- Washed-out colours: render targets attached in their view's sRGB format. Noise in clouds: `char` is unsigned on Android (`-fsigned-char`).
+- Pipelines the driver refused (`VK_ERROR_UNKNOWN`): fragment shader variants for inputs the vertex stage does not write.
+- Low frame rate: syncs limited to what a draw reads, passes kept open, early and mid-pass submissions, constant buffers copied only as far as the shader reads,
+  pipeline keys built from the state fields (the game's state objects carried leftover bits: thousands of needless pipelines), a capped pipeline prebuild.
+- Piranha Plants on Parade (a level timed to the music) softlocked at 20-30 fps: *Game time* holds the audio to the game's frames.
+- Super Mario Bros. Wonder's render scale: a rewriter stub multiplies the game's dynamic-resolution factor (`dm/games/010015100B514000/patches.py`).
+
+Result on the POCO X5 5G at render scale 0.8: about 30 fps in levels and on the world map, also with many effects on screen.
+
+---
+
+
 # nxnative
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
