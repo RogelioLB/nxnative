@@ -8,6 +8,7 @@ DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default 
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
+DM_AUDIO_PACE	switch	`game` holds the audio clock to the game's own time (its presents × their vsyncs) when the game runs slower than real time, so sequences timed to the music stay in step with the picture; the music can stutter (`hle_audren.c`; Android settings screen: Game timing)
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
@@ -19,6 +20,7 @@ DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for tha
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
+DM_DUMP_DIR	path	Android: folder for frame dumps and profiles (`files/dump`, set by `front_android.c`): `DM_VK_DUMP` and `files/dump_now` write each pass's colour targets and a per-draw log there
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the Increased Memory Limit one; empty means no entitlements
 DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into the app as `dm/env.txt`, applied at boot; `Documents/env.txt` overrides them
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
@@ -89,6 +91,8 @@ DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass 
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
+DM_NVN_DEMO	test	Android command-line host (`front_cli.c`): `=<frames>` draws that many frames of the NVN demo (`nvn_demo.c`: clears, a texture, a synthetic-shader triangle) through the Vulkan replay after the guest returns; 3 by default
+DM_NVN_DEMO_MODE	test	The NVN demo's state: `ul` upper-left window origin with back faces culled (as most games set at start), `ulf` front faces culled (the triangle disappears), `llf` front faces culled at the lower-left origin (`nvn_demo.c`)
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
 DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same
@@ -122,6 +126,7 @@ DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as 
 DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_manifest.tsv` are taken from the same folder. Default: the game profile's folder on the Mac; the iOS app sets it
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
 DM_NVN_SHOT_OUT	diagnostic	`=<W>x<H>` makes `DM_NVN_SHOT` capture the picture as the present pass upscales it to that size, the crop included, instead of the raw swapchain texture
+DM_NVN_SIZE_TRACE	diagnostic	`=<w>x<h>` logs the 2D texture sizes the game describes and the game's call chain where it sets a viewport of that size (`hle_nvn.c`; how a game sizes its render targets)
 DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of those fragment shaders, to measure their GPU cost or bisect a wrong draw; the picture is wrong
 DM_NVN_SKIP_SMALL	diagnostic	`=<width>` drops all draws whose target width is at most that, to measure the cost of tiny render passes; the picture is wrong
 DM_NVN_SLICE_MERGE	switch	`0` keeps passes into other layers of one array or cube texture level apart (on by default: they run as one layered pass)
@@ -166,8 +171,10 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_MERGE	switch	`=1` on the Mac merges every controller into player 1, as before, instead of giving each controller a player of its own
+DM_PAD_TEST	test	Android: `1` sends made-up touches to the virtual gamepad and checks every control (`Gamepad.java` selfCheck)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
+DM_PIPELINE_CACHE	path	Android: the Vulkan pipeline cache file; `<file>.keys4` lists the pipelines made, made again at start (`gfx_vk_draw.inc`, set by `front_android.c`)
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
 DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind
@@ -228,6 +235,7 @@ DM_RUMBLE	player	`0` turns game rumble off (on by default); launcher setting
 DM_RUMBLE_GAIN	player	`=0..3` scales the rumble strength (default 1, `0` is silent); launcher setting
 DM_RUMBLE_LOG	diagnostic	`=1` logs the game's vibration handle requests and, once a second, the values it sent, how many had no routed output and the peak amplitude
 DM_RUMBLE_MIN	player	`=0..0.9`: controller rumble levels below it stay silent and the rest is stretched over the full range (default 0; the phone is unaffected); for games whose quiet HD rumble texture keeps rotating motors running (Mario Kart 8 Deluxe: 0.45); launcher setting
+DM_RUMBLE_TEST	test	Android: vibrates as a game would (both motors at 0.8 for half a second) after the self test (`front_android.c`)
 DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>_device`, and `pso_user.tsv` goes in its parent folder; the Mac launcher, the iOS app and the NSP script set it
 DM_SAVED_CHOICES	switch	`0` ignores the player's saved choices (launcher.<VAR> in the app's preferences) and leaves them saved; the Mac launcher and the iOS settings screen
 DM_SCHEME_NAME	switch	Set by `build_ipa.sh` itself for xcodegen's `project.yml`: the Xcode scheme name, `DmIOS`, or `<display name> (<title ID>)` for a project prepared with `--prepare-xcode`
@@ -241,8 +249,10 @@ DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log on
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
+DM_SPV_DIR	path	Android: folder of the game's shaders translated to SPIR-V for the Vulkan replay (`game/spv`, from `dm/android/tools/spv_build.py`)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
+DM_TARGET	switch	`android` makes `patch_nso.py` rewrite the thread-slot reads for Android (`mov xN, x18`) instead of Apple's; the Android packing script sets it
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
 DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); stand-in system data goes in `<DM_TEMP>_sysdata`; the Mac launcher, the iOS app and the NSP script set it
 DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic pipeline archive restart fixture
@@ -261,6 +271,7 @@ DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard ha
 DM_TEST_TRANSFORM_FEEDBACK	test	Path to the native t_transform_feedback executable used by the Python feedback tests
 DM_TEST_UP_LEAK	diagnostic	`=1` keeps the old upload staging block instead of retiring it, as before the fix, to measure the leak
 DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as dropped, to exercise the re-upload path
+DM_TEXT_TEST	test	Android: `1` shows the software keyboard's text box once after the demo, `2` also types and confirms in it (`front_android.c`, `Gamepad.java`)
 DM_THERMAL_CAP	switch	`0` turns off the thermal cap, which holds the frame step at 30 fps while iOS reports a serious or critical thermal state (on by default)
 DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four arguments, and each `CreateThread` with entry, stack, priority and core
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`
@@ -269,7 +280,11 @@ DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (samp
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
+DM_VK_DEBUG	diagnostic	Android: logs every shader and pipeline the Vulkan replay makes (`gfx_vk_draw.inc`)
+DM_VK_DUMP	diagnostic	Android: `=<frame>` dumps every pass's colour targets of that frame to `DM_DUMP_DIR` with a per-draw log (`files/dump_now` asks for the next frame)
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
+DM_VK_PREWARM	switch	Android: how many pipelines of the list the replay makes again at start (default 3000; `0` none)
+DM_VK_SAFE	diagnostic	Android: `1` turns off the replay's GPU forwarding, early submissions and window fences (every sync waits), to tell a sync bug from a drawing one
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path

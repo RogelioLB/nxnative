@@ -179,7 +179,9 @@ static void start_host(void) {
     snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);
     if (exists(buf)) {
         snprintf(buf, sizeof buf, "%s/game", g_ext); setenv("DM_ROOT", buf, 0);
-        snprintf(buf, sizeof buf, "%s/game/RomFS", g_ext); if (exists(buf)) setenv("DM_ROMFS", buf, 0);
+        snprintf(buf, sizeof buf, "%s/game/RomFS", g_ext);   // a RomFS folder, or the packing script's RomFS image (hle_fs.c reads one as it is)
+        if (!exists(buf)) snprintf(buf, sizeof buf, "%s/game/RomFS.img", g_ext);
+        if (exists(buf)) setenv("DM_ROMFS", buf, 0);
         snprintf(buf, sizeof buf, "%s/game/aoc", g_ext); if (exists(buf)) setenv("DM_AOC_DIR", buf, 0);
         snprintf(buf, sizeof buf, "%s/game/spv", g_ext); setenv("DM_SPV_DIR", buf, 0);   // the game's shaders translated for Vulkan (gfx_vk_draw.inc)
         // Shared fonts (hle_sdk16.c): the button icons from the packing script's nintendo_ext.ttf; the standard font is the system's Roboto
