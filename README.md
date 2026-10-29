@@ -1,14 +1,31 @@
 # nxnative-android
 
-**Nintendo Switch games running natively on Android phones.** This repository is a fork of [seedds/nxnative](https://github.com/seedds/nxnative), which runs
-Switch games natively on the iPhone, the iPad and the Mac; this fork adds **Android**: the same host built for Android, the games' graphics replayed on Vulkan,
-an Android app with a game launcher, and a desktop app that packs your games and puts them on your phone.
+**Nintendo Switch games running natively on Android phones: not an emulator.** The game's own ARM64 code runs directly on the phone's CPU, and its NVN
+graphics are replayed on the phone's GPU through Vulkan. Super Mario Bros. Wonder plays at about 30 fps (render scale 0.8) on a mid-range Snapdragon 695 phone.
 
-It is not an emulator. The game's own ARM64 code runs directly on the phone's CPU, rewritten only where the host needs it; a host answers the Switch's system
-calls and SDK services, and the game's NVN graphics commands are replayed on the phone's GPU through Vulkan. Nothing from any game is in this repository: you
-bring **your own** game files and the keys of **your own** Switch. The project is not affiliated with Nintendo or any game publisher.
+- **Native, not emulated.** A Switch and an Android phone both run ARM64 code: the game's code is rewritten only where the host needs it (system calls,
+  thread registers), and a host answers the Switch's system calls and SDK services. There is no CPU emulation.
+- **One app for every game.** An Android launcher lists your games, with per-game settings (console mode, language, render scale, frame-rate counter, touch
+  controls or a controller) and a button back to the launcher in game.
+- **A desktop app that does the packing.** Pick the folder with your game's files; it extracts the game, rewrites its code, translates its shaders and
+  installs it on your phone over USB or Wi-Fi.
 
-Everything below the line further down is the original project's README (the iPhone and Mac side), kept as it is apart from a pointer to Android.
+This repository is a fork of [seedds/nxnative](https://github.com/seedds/nxnative), which runs Switch games natively on the iPhone, the iPad and the Mac, and
+is built on [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) and Ryujinx's shader translator ([Acknowledgements](#acknowledgements)). This fork adds
+**Android**. Everything below the line further down is the original project's README (the iPhone and Mac side), kept as it is apart from a pointer to Android.
+
+> [!IMPORTANT]
+> **Bring your own game.** Nothing from any game is in this repository, and no packed game is distributed: you dump the game and the keys from **your own**
+> Switch, and the app you build for your phone is for you only. Do not share APKs packed with a game (they carry its code and files), keys or firmware, and do
+> not ask for them in issues. The project is not affiliated with Nintendo or any game publisher.
+
+## Quick start
+
+1. Dump your game (NSP files of the base game and its update) and your `prod.keys` from your Switch ([What you need](#what-you-need)).
+2. Turn on USB or wireless debugging on the phone.
+3. On the computer: `pip install lz4 capstone fonttools backports.zstd PySide6`, then `python scripts/nxnative_android.py`. Its **Settings** page checks the
+   rest (Android SDK and NDK, .NET, a JDK) and says how to get what is missing.
+4. **+ Build game**, pick the game's folder, then **Build and install**. Open **nxnative** on the phone and pick the game.
 
 ## How it fits together
 
@@ -39,7 +56,7 @@ Tested on a **POCO X5 5G** (Snapdragon 695, Adreno 619 GPU, Android 14). Other p
 |---|---|
 | Super Mario Bros. Wonder 1.2.1 | Playable: about 30 fps in levels and on the world map at render scale 0.8 |
 | Super Mario 3D World + Bowser's Fury 1.2.2 | Bowser's Fury runs with correct colours; one launch stopped at a black loading screen (open, see the game's note) |
-| Danganronpa V3: Killing Harmony Anniversary Edition 1.0.2 | Boots, plays its opening movie and draws its picture, from a provisional (guessed) profile; not played through |
+| Danganronpa V3: Killing Harmony Anniversary Edition 1.0.2 | Runs from a provisional (guessed) profile: its menus, its in-game movies and the start of the story; not played through |
 | The Binding of Isaac: Afterbirth+ 1.7.9b with Repentance | Runs from a provisional profile, with its Repentance DLC; it compiles its shaders at run time, captured on the phone (58 so far, below) |
 
 Every other game in the [games table](dm/games/README.md#games) has a profile and can be packed the same way, but has not been run on Android. A game without a

@@ -7,6 +7,8 @@ a correct picture (the [README](../../README.md#status) has the list).
 
 Translating shaders on the phone, at the moment a game uses them (instead of before packing): [plan_on_device_shaders.md](plan_on_device_shaders.md).
 
+This host on Windows on Arm (Snapdragon laptops and tablets), reusing the Vulkan replay: [plan_windows_arm.md](../../docs/plan_windows_arm.md).
+
 ## Status
 
 | Part | State |
