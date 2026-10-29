@@ -1,7 +1,8 @@
 # Android build of the host (arm64-v8a): the shared host sources (dm/host, the C parts of dm/gfx) with the Darwin stand-ins of compat/, the
-# Android front end and graphics backend. Two products from one set of objects:
-#   libdmhost.so  the app's native library (NativeActivity, apk/)
-#   dmhost        a command-line host for adb shell (headless: no window, silent audio unless DM_AUDIO=1), like the Mac's dmhost
+# Android front end and graphics backend. Two products from one set of objects, and the app's loader:
+#   libdmhost_<GAME>.so  the game's host in the app: one APK carries the host of every game packed on the computer (scripts/build_android_from_nsp.py)
+#   dmhost               a command-line host for adb shell (headless: no window, silent audio unless DM_AUDIO=1), like the Mac's dmhost
+#   libnxloader.so       the NativeActivity's library: starts the host of the game the launcher picked (loader.c)
 # Configure with the NDK's toolchain file and the game profile, as the Mac host is built per profile:
 #   cmake -G Ninja -S dm/android -B <build dir> -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a
 #         -DANDROID_PLATFORM=android-29 -DGAME=<base game title ID> [-DDM_GAMES_DIR=<profiles folder outside dm/games>]
@@ -87,7 +88,11 @@ target_include_directories(dmhost_app PRIVATE $<TARGET_PROPERTY:dmcore,INTERFACE
 target_compile_options(dmhost_app PRIVATE -include dm_android.h -ffixed-x18 -O1 -g -Wall)
 target_link_libraries(dmhost_app ${DM_LIBS} jnigraphics)
 target_link_options(dmhost_app PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384 -u ANativeActivity_onCreate)
-set_target_properties(dmhost_app PROPERTIES OUTPUT_NAME dmhost)
+set_target_properties(dmhost_app PROPERTIES OUTPUT_NAME dmhost_${GAME})
+add_library(nxloader SHARED ${CMAKE_CURRENT_SOURCE_DIR}/loader.c)
+target_compile_options(nxloader PRIVATE -O2 -Wall -fvisibility=hidden)
+target_link_libraries(nxloader log android dl)
+target_link_options(nxloader PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384)
 
 add_executable(dmhost_cli $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_cli.c ${CMAKE_CURRENT_SOURCE_DIR}/nvn_demo.c)
 set_target_properties(dmhost_cli PROPERTIES OUTPUT_NAME dmhost)

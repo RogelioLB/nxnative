@@ -1,7 +1,10 @@
 // Android front end (NativeActivity, libdmhost.so): the app's window, input, lifecycle and log, around the host's main() (main.c).
-//   Game files: <external files>/game/ — code/ (the modules rewritten with DM_TARGET=android: <name>.patched.bin, .fixups.tsv, .gates.tsv ...),
-//   RomFS/, optionally aoc/; switches in <external files>/env.txt (KEY=VALUE per line, as the iPhone's Documents/env.txt). Save data stays in the
-//   app's internal storage. Without a game the app runs the built-in self test (assets/selftest: dm/android/tests/selftest_nso.py, rewritten).
+//   This library is one game's host, libdmhost_<title ID>.so, started by the loader (loader.c) for the game the launcher picked (java Launcher.java).
+//   Game files: <external files>/games/<title ID>/ — code/ (the modules rewritten with DM_TARGET=android: <name>.patched.bin, .fixups.tsv, .gates.tsv ...),
+//   RomFS/ or RomFS.img, optionally aoc/, and launcher.txt (the settings screen's choices); switches for every game in <external files>/env.txt (KEY=VALUE per line,
+//   as the iPhone's Documents/env.txt). Save data stays in the app's internal storage, a folder per game (saves/<title ID>), and so does the driver's pipeline cache
+//   (cache/<title ID>). Without its game (or with DM_FORCE_SELFTEST, the launcher's self test) the host runs the built-in self test (assets/selftest:
+//   dm/android/tests/selftest_nso.py, rewritten).
 //   Log: the host's stderr goes to logcat (tag nxnative) and to <external files>/log.txt.
 //   Window: Vulkan, on the NVN replay's device (gfx_vk.c). The window texture the game presented last is drawn scaled to fit (vkb_frame_lock);
 //   before the first one, and without a game, a status screen. The device's Vulkan capabilities are written to the log at start.
@@ -15,6 +18,7 @@
 #include <android_native_app_glue.h>
 #include <jni.h>
 #include <stdatomic.h>
+#include <math.h>
 #include <sys/stat.h>
 #include "gfx_vk.h"
 #include "game_profile.h"   // DM_GAME_PAD_LAYOUT
@@ -29,7 +33,7 @@ enum { ST_START, ST_SELFTEST, ST_PASS, ST_FAIL, ST_GAME, ST_ENDED, ST_CRASHED, S
 static int g_demo_frames;   // frames the NVN picture check presented (nvn_demo.c)
 static _Atomic int g_state = ST_START;
 static _Atomic uint64_t g_frames;
-static char g_ext[512], g_int[512], g_last[160];
+static char g_ext[512], g_int[512], g_game[600], g_last[160];   // g_game: <external files>/games/<title ID>
 static pthread_mutex_t g_txt_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct android_app *g_app;
 
@@ -67,9 +71,9 @@ static void log_start(void) {
 // ---------- Files ----------
 static int exists(const char *p) { struct stat st; return !stat(p, &st); }
 static void mkdirs(const char *p) { char b[600]; snprintf(b, sizeof b, "%s", p); for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0755); *s = '/'; } mkdir(b, 0755); }
-// <external files>/env.txt: KEY=VALUE per line; # comments. Then launcher.txt, the settings screen's choices (java Launcher.java), without overriding env.txt
-static void env_file(const char *name, int over) {
-    char path[600]; snprintf(path, sizeof path, "%s/%s", g_ext, name);
+// <external files>/env.txt: KEY=VALUE per line; # comments. Then the game's launcher.txt, the settings screen's choices (java Launcher.java), without overriding env.txt
+static void env_file(const char *dir, const char *name, int over) {
+    char path[700]; snprintf(path, sizeof path, "%s/%s", dir, name);
     FILE *f = fopen(path, "r"); if (!f) return;
     char line[1024];
     while (fgets(line, sizeof line, f)) {
@@ -168,28 +172,34 @@ static void *guest_thread(void *p) {
 // The guest's main thread is the thread main() runs on: it returns into bionic afterwards, so x18 goes back to bionic's value (dm.h dm_slots_x18_restore)
 void front_run(void (*guest)(void)) { guest(); dm_slots_x18_restore(); }
 static void start_host(void) {
-    char code[600], buf[700];
-    snprintf(code, sizeof code, "%s/game/code", g_ext);
-    snprintf(buf, sizeof buf, "%s/save", g_int); mkdirs(buf); setenv("DM_SAVE", buf, 0);
+    char code[700], buf[700];
+    snprintf(code, sizeof code, "%s/code", g_game);
+    // a folder per game: saves/<id> (hle_fs.c makes <DM_SAVE>_device beside it for a device save), the driver's pipeline cache in cache/<id>. Saves of the one-game
+    // installs (internal files/save) are copied into saves/<id> by the launcher before the game first starts there (Launcher.java migrate); the old folder stays
+    snprintf(buf, sizeof buf, "%s/saves", g_int); mkdirs(buf);
+    snprintf(buf, sizeof buf, "%s/saves/%s", g_int, DM_GAME_ID); setenv("DM_SAVE", buf, 0);
     snprintf(buf, sizeof buf, "%s/temp", g_int); mkdirs(buf); setenv("DM_TEMP", buf, 0);
-    snprintf(buf, sizeof buf, "%s/pipeline.cache", g_int); setenv("DM_PIPELINE_CACHE", buf, 0);   // gfx_vk_draw.inc
+    snprintf(buf, sizeof buf, "%s/cache/%s", g_int, DM_GAME_ID); mkdirs(buf);
+    snprintf(buf, sizeof buf, "%s/cache/%s/pipeline.cache", g_int, DM_GAME_ID); setenv("DM_PIPELINE_CACHE", buf, 0);   // gfx_vk_draw.inc
     setenv("DM_AUDIO", "1", 0);
     setenv("DM_OPMODE", "0", 0);   // a phone is a handheld: games draw at the panel's 720p, not the TV's 1080p (the Adreno 619 cannot keep docked passes at 60 fps); env.txt DM_OPMODE=1 overrides
     snprintf(buf, sizeof buf, "%s/dump", g_ext); setenv("DM_DUMP_DIR", buf, 0); if (getenv("DM_VK_DUMP")) mkdirs(buf);   // gfx_vk_draw.inc dump_write (files/dump_now asks for one)
     snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);
-    if (exists(buf)) {
-        snprintf(buf, sizeof buf, "%s/game", g_ext); setenv("DM_ROOT", buf, 0);
-        snprintf(buf, sizeof buf, "%s/game/RomFS", g_ext);   // a RomFS folder, or the packing script's RomFS image (hle_fs.c reads one as it is)
-        if (!exists(buf)) snprintf(buf, sizeof buf, "%s/game/RomFS.img", g_ext);
+    if (exists(buf) && !getenv("DM_FORCE_SELFTEST")) {
+        setenv("DM_ROOT", g_game, 0);
+        snprintf(buf, sizeof buf, "%s/RomFS", g_game);   // a RomFS folder, or the packing script's RomFS image (hle_fs.c reads one as it is)
+        if (!exists(buf)) snprintf(buf, sizeof buf, "%s/RomFS.img", g_game);
         if (exists(buf)) setenv("DM_ROMFS", buf, 0);
-        snprintf(buf, sizeof buf, "%s/game/aoc", g_ext); if (exists(buf)) setenv("DM_AOC_DIR", buf, 0);
-        snprintf(buf, sizeof buf, "%s/game/spv", g_ext); setenv("DM_SPV_DIR", buf, 0);   // the game's shaders translated for Vulkan (gfx_vk_draw.inc)
+        snprintf(buf, sizeof buf, "%s/aoc", g_game); if (exists(buf)) setenv("DM_AOC_DIR", buf, 0);
+        snprintf(buf, sizeof buf, "%s/spv", g_game); setenv("DM_SPV_DIR", buf, 0);   // the game's shaders translated for Vulkan (gfx_vk_draw.inc)
         // Shared fonts (hle_sdk16.c): the button icons from the packing script's nintendo_ext.ttf; the standard font is the system's Roboto
-        snprintf(buf, sizeof buf, "%s/game/font", g_ext); if (exists(buf)) setenv("DM_FONT_DIR", buf, 0);
+        snprintf(buf, sizeof buf, "%s/font", g_game); if (exists(buf)) setenv("DM_FONT_DIR", buf, 0);
         if (exists("/system/fonts/Roboto-Regular.ttf")) setenv("DM_SHARED_FONT", "/system/fonts/Roboto-Regular.ttf", 0);
         g_argv[0] = "dmhost"; g_argv[1] = strdup(code); g_argc = 2;
         atomic_store(&g_state, ST_GAME); LOG("game in %s", code);
     } else {
+        { struct stat st; snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);   // a game copied there that the app may not read (folders adb made without access for it: Android 15)
+          if (stat(buf, &st) && errno == EACCES) LOG("[RED] the game in %s cannot be read by the app (permission denied): run the packing script again, or chmod its folders 0777 from adb shell", code); }
         snprintf(buf, sizeof buf, "%s/selftest", g_int);
         if (!copy_assets("selftest", buf)) { LOG("[RED] no game in %s and no self test in the app's assets", code); atomic_store(&g_state, ST_FAIL); return; }
         setenv("DM_DBG", "1", 1);
@@ -356,7 +366,7 @@ static void status_draw(void) {
         snprintf(line, sizeof line, "frames presented: %llu", (unsigned long long)atomic_load(&g_frames)); text(line, u, y, 0.9f * u, 0xFFE0E0E0); y += 1.2f * u;
         text("Loading the game...", u, y, 0.55f * u, 0xFFFFD080); y += 0.8f * u;
     }
-    if (st == ST_SELFTEST || st == ST_PASS) { text("No game in Android/data/org.nxnative.android/files/game/", u, y, 0.55f * u, 0xFFA0A0A0); y += 0.8f * u; }
+    if (st == ST_SELFTEST || st == ST_PASS) { text(getenv("DM_FORCE_SELFTEST") ? "Self test (from the launcher)" : "No game in Android/data/org.nxnative.android/files/games/" DM_GAME_ID "/", u, y, 0.55f * u, 0xFFA0A0A0); y += 0.8f * u; }
     pthread_mutex_lock(&g_txt_mu); snprintf(line, sizeof line, "%.120s", g_last); pthread_mutex_unlock(&g_txt_mu);
     text(line, u, (float)g_ext2.height - u, 0.45f * u, 0xFF909090);
     // bitmap → staging buffer (RGBA bytes; swapped to BGRA for a BGRA swapchain)
@@ -518,19 +528,29 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
     if (atomic_load(&g_state) != ST_GAME) return 0;
     int src = AInputEvent_getSource(ev);
     if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_KEY) {
-        uint64_t b = key_button(AKeyEvent_getKeyCode(ev)); if (!b) return 0;
+        int32_t code = AKeyEvent_getKeyCode(ev); uint64_t b = key_button(code);
+        // a controller's Back key (some send it for B or for their back / select button) is B: left to Android, Back closes the activity and the game with it, unsaved.
+        // The phone's own Back (gesture or key, a keyboard source) keeps doing that
+        if (!b && code == AKEYCODE_BACK && (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD) b = DM_BTN_B;
+        if (!b) return 0;
         if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN) g_pad_btn |= b; else if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) g_pad_btn &= ~b;
         g_ctl_used = 1; pad_now(g_pad_btn); return 1;
     }
     if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) return 0;
     if (src & AINPUT_SOURCE_JOYSTICK) {
         g_axis[0] = ax(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_X, 0)); g_axis[1] = -ax(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_Y, 0));
-        g_axis[2] = ax(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_Z, 0)); g_axis[3] = -ax(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RZ, 0));
+        // the right stick on Z / RZ (Android's key layouts for known controllers), else on RX / RY (a controller Android has no layout for)
+        float zx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_Z, 0), zy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RZ, 0);
+        if (!ax(zx) && !ax(zy)) { zx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RX, 0); zy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RY, 0); }
+        g_axis[2] = ax(zx); g_axis[3] = -ax(zy);
         float hx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_X, 0), hy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_Y, 0);
         uint64_t b = g_pad_btn & ~(uint64_t)(DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_DOWN);
         if (hx < -0.5f) b |= DM_BTN_LEFT; if (hx > 0.5f) b |= DM_BTN_RIGHT; if (hy < -0.5f) b |= DM_BTN_UP; if (hy > 0.5f) b |= DM_BTN_DOWN;
-        if (AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_LTRIGGER, 0) > 0.5f) b |= DM_BTN_ZL; else if (!(g_pad_btn & DM_BTN_ZL)) b &= ~(uint64_t)DM_BTN_ZL;
-        if (AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RTRIGGER, 0) > 0.5f) b |= DM_BTN_ZR; else if (!(g_pad_btn & DM_BTN_ZR)) b &= ~(uint64_t)DM_BTN_ZR;
+        // analog triggers on LTRIGGER / RTRIGGER, or BRAKE / GAS (Xbox controllers over Bluetooth, among others)
+        float lt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_LTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_BRAKE, 0));
+        float rt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_GAS, 0));
+        if (lt > 0.5f) b |= DM_BTN_ZL; else if (!(g_pad_btn & DM_BTN_ZL)) b &= ~(uint64_t)DM_BTN_ZL;
+        if (rt > 0.5f) b |= DM_BTN_ZR; else if (!(g_pad_btn & DM_BTN_ZR)) b &= ~(uint64_t)DM_BTN_ZR;
         g_ctl_used = 1; pad_now(b); return 1;
     }
     if (src & AINPUT_SOURCE_TOUCHSCREEN) {   // the touch points as fractions of the window (the 16:9 picture once it is drawn)
@@ -567,10 +587,11 @@ void android_main(struct android_app *app) {
     g_app = app;
     snprintf(g_ext, sizeof g_ext, "%s", app->activity->externalDataPath ? app->activity->externalDataPath : app->activity->internalDataPath);
     snprintf(g_int, sizeof g_int, "%s", app->activity->internalDataPath);
+    snprintf(g_game, sizeof g_game, "%s/games/%s", g_ext, DM_GAME_ID);
     mkdirs(g_ext); mkdirs(g_int);
     log_start();
-    LOG("nxnative for Android: files %s, internal %s", g_ext, g_int);
-    env_file("env.txt", 1); env_file("launcher.txt", 0);
+    LOG("nxnative for Android: %s (%s), files %s, internal %s", DM_GAME_NAME, DM_GAME_ID, g_game, g_int);
+    env_file(g_ext, "env.txt", 1); env_file(g_game, "launcher.txt", 0);
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     for (;;) {

@@ -1,66 +1,133 @@
-# nxnative for Android (fork)
+# nxnative-android
 
-This repository is a **fork** of [seedds/nxnative](https://github.com/seedds/nxnative): a copy of the original project, kept on its own account, where the Android port was
-developed. nxnative runs Nintendo Switch games natively (the game's own ARM64 code, rewritten only where the host requires it) on the iPhone and the Mac; this fork adds
-**Android phones**. The changes are offered back to the original project as a pull request; everything below the line is the original project's README, unchanged.
+**Nintendo Switch games running natively on Android phones.** This repository is a fork of [seedds/nxnative](https://github.com/seedds/nxnative), which runs
+Switch games natively on the iPhone, the iPad and the Mac; this fork adds **Android**: the same host built for Android, the games' graphics replayed on Vulkan,
+an Android app with a game launcher, and a desktop app that packs your games and puts them on your phone.
 
-**Tested:** Super Mario Bros. Wonder 1.2.1 on a POCO X5 5G (Snapdragon 695, Adreno 619 GPU, Android 14). Other games and phones have not been tried.
+It is not an emulator. The game's own ARM64 code runs directly on the phone's CPU, rewritten only where the host needs it; a host answers the Switch's system
+calls and SDK services, and the game's NVN graphics commands are replayed on the phone's GPU through Vulkan. Nothing from any game is in this repository: you
+bring **your own** game files and the keys of **your own** Switch. The project is not affiliated with Nintendo or any game publisher.
 
-## Playing your own copy
+Everything below the line further down is the original project's README (the iPhone and Mac side), kept as it is apart from a pointer to Android.
 
-nxnative ships no game. You need **your own** dump of a game you own and the keys of **your own** Switch; downloaded game files are not supported.
+## How it fits together
 
-1. **Dump your game and keys** on your Switch: the game as NSP / XCI files (for example with nxdumptool: the base game and, if you have it, its update) and your `prod.keys`
-   (Lockpick_RCM). Put the game's files in one folder on your computer.
-2. **Install the tools** on the computer (Windows, macOS or Linux): Python 3.12 with `lz4`, `capstone` and `fonttools` (`pip install lz4 capstone fonttools`), the .NET SDK 10,
-   the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass `--sdk`), `adb`, and a JDK (for `keytool` and `javac`).
-3. **Connect the phone** with USB debugging on (or wireless debugging), and check that `adb devices` lists it.
-4. **Pack and install:**
+```
+ Your computer (Windows, macOS or Linux)                         Your Android phone
+ ───────────────────────────────────────                         ─────────────────────────────────────
+ NSP / XCI files + prod.keys                                     nxnative app (org.nxnative.android)
+          │                                                        ├─ Launcher: the games on the phone,
+          ▼                                                        │    each game's settings, Play
+ Desktop app: scripts/nxnative_android.py                          │
+ (or the command line: scripts/build_android_from_nsp.py)          └─ Game screen, in its own process:
+          │  1. extract the game (nx_extract)                           loads that game's host
+          │  2. rewrite its code for Android (patch_nso.py)             (libdmhost_<title ID>.so), which runs
+          │  3. split its shaders, translate them to SPIR-V             the game's code and replays its
+          │  4. build the game's host with the Android NDK              graphics on Vulkan
+          │  5. pack one APK carrying every game built so far
+          └─ adb: install the APK, copy the game files ──────▶   Android/data/org.nxnative.android/files/games/<title ID>/
+```
 
-   ```
-   python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"
-   ```
+One app holds every game: each game you build adds its host to a library on your computer, and every APK is packed from the whole library, so building a second
+game keeps the first one in the app. Game files (code, shaders, RomFS, icon) live in the app's folder on the phone; saves stay in the app's internal storage.
 
-   It extracts the newest version in the folder (`-p v0` picks the base game), rewrites the game's code for Android, translates its shaders to SPIR-V, builds the app
-   (`<folder>/<name>.apk`), installs it and copies the game files to the phone (`Android/data/org.nxnative.android/files/game/`). The first run takes a while (the shaders
-   and the RomFS). `--no-push` builds the APK only; `-l es-419` (or another code or name) picks the default game language. Only games with a profile in `dm/games/` are packed.
-5. **Play:** open **nxnative** on the phone. A settings screen shows the game's icon and its settings; tap **Play**.
+## Status
 
-**Settings** (remembered between runs): console mode (handheld is lighter), game language, game timing (*Game time* keeps levels timed to the music in step with the
-picture when the phone runs the game below its frame rate; the music can stutter), render scale (Mario: 0.5 to 1.0 of the game's 3D resolution; 0.8 holds 30 fps on the
-Adreno 619), the frame-rate counter, game rumble and its strength. Lines like `DM_RENDER_SCALE=0.8` in `Android/data/org.nxnative.android/files/env.txt` win over the
-screen. Saves stay in the app's own storage; the log is `Android/data/org.nxnative.android/files/log.txt`.
+Tested on a **POCO X5 5G** (Snapdragon 695, Adreno 619 GPU, Android 14). Other phones and GPUs have not been tried.
 
-The first time a scene appears the app makes its graphics pipelines (short stutters); it remembers them for the next start.
+| Game | State on Android |
+|---|---|
+| Super Mario Bros. Wonder 1.2.1 | Playable: about 30 fps in levels and on the world map at render scale 0.8 |
+| Super Mario 3D World + Bowser's Fury 1.2.2 | Bowser's Fury runs with correct colours; one launch stopped at a black loading screen (open, see the game's note) |
+| Danganronpa V3: Killing Harmony Anniversary Edition 1.0.2 | Boots, plays its opening movie and draws its picture, from a provisional (guessed) profile; not played through |
 
-## What was done to run on Android
+Every other game in the [games table](dm/games/README.md#games) has a profile and can be packed the same way, but has not been run on Android. A game without a
+profile can still be packed as an *experimental build* (below): most likely it does not boot, but it is the starting point for porting it.
 
-The iOS / Mac host runs the game's code natively and answers the Switch system calls and SDK services; graphics go through Metal. On Android the same host runs, with:
+## What you need
 
-- **The host on Android** (`dm/android`): a NativeActivity app (`front_android.c`); the Darwin APIs the host uses are emulated by compatibility headers (`dm/android/compat`);
-  the guest's thread slots go through the x18 register (the rewriter emits `mov xN, x18` for `DM_TARGET=android`).
-- **NVN on Vulkan** (`gfx_vk.c`, `gfx_vk_draw.inc`): a replay of the game's NVN command buffers on Vulkan: textures (BC formats decoded on the CPU where the GPU lacks them),
-  copies, clears, draws, compute, indirect draws, transform feedback, occlusion queries and GPU timestamps, submitted in chunks so the GPU works while the CPU records.
-  Shaders are translated with the project's translator and post-processed for Android drivers (`tools/spv_android.py`).
-- **Audio, movies, input:** AAudio, MediaCodec (H.264 / AAC), touch controls drawn over the game (2D / 3D layouts), physical controllers, rumble and the motion sensor.
-- **Settings screen** (`java/.../Launcher.java`) before the game, as on iOS.
-- **Packing script** `scripts/build_android_from_nsp.py`.
+- **Your game and keys**, dumped from your own Switch: the game as NSP / XCI files (the base game and, if you have it, its update; for example with nxdumptool) in one
+  folder, and your `prod.keys` (Lockpick_RCM).
+- **On the computer:** Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (not needed on Python 3.14), plus `PySide6` for the desktop app:
+  `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
+  `--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing.
+- **On the phone:** USB debugging (or wireless debugging) turned on, so that `adb devices` lists the phone, and room for the game: its RomFS is copied as one image
+  (Danganronpa V3's is 6.7 GB).
 
-Problems found on the way, each with its cause and fix in [docs/reference/rendering.md](docs/reference/rendering.md#android-vulkan-replay) and
-[docs/reference/audio.md](docs/reference/audio.md):
+## The desktop app
 
-- Vertical stripes: the Adreno driver misreads dynamic vector components in uniform buffers; shaders are rewritten to load the whole vector and select.
-- Washed-out colours: render targets attached in their view's sRGB format. Noise in clouds: `char` is unsigned on Android (`-fsigned-char`).
-- Pipelines the driver refused (`VK_ERROR_UNKNOWN`): fragment shader variants for inputs the vertex stage does not write.
-- Low frame rate: syncs limited to what a draw reads, passes kept open, early and mid-pass submissions, constant buffers copied only as far as the shader reads,
-  pipeline keys built from the state fields (the game's state objects carried leftover bits: thousands of needless pipelines), a capped pipeline prebuild.
-- Piranha Plants on Parade (a level timed to the music) softlocked at 20-30 fps: *Game time* holds the audio to the game's frames.
-- Super Mario Bros. Wonder's render scale: a rewriter stub multiplies the game's dynamic-resolution factor (`dm/games/010015100B514000/patches.py`).
+`python scripts/nxnative_android.py` opens a window that drives the packing script and adb for you:
 
-Result on the POCO X5 5G at render scale 0.8: about 30 fps in levels and on the world map, also with many effects on screen.
+- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
+  The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
+  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
+- **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
+- **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), the app version and the games on each phone, saves backed up to the computer.
+- **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
+- **Settings:** your `prod.keys`, and the requirements above with how to install what is missing.
+
+A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
+copied to the phone again when the phone already holds the same one.
+
+## The Android app
+
+- **Launcher.** Opening **nxnative** shows the games on the phone with their icon, name and version (a game whose host the installed app lacks is marked as needing an
+  app update). Picking a game opens its **settings screen**, grouped into Game and Controls: console mode (handheld is lighter), game language, game timing, render
+  scale where the game supports it, the frame-rate counter, rumble and its strength. **Play** starts the game. Lines like `DM_RENDER_SCALE=0.8` in
+  `Android/data/org.nxnative.android/files/env.txt` win over the screen (they show greyed out).
+- **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
+  to the game's touch screen. A physical controller works as player 1 and hides the touch controls; rumble goes to the controller or the phone, and shaking the phone
+  shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
+  it, and picking another game asks before closing the running one.
+- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
+  `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s nxnative`).
+
+## Packing from the command line
+
+```
+python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
+    -p v0                pack the base game instead of the newest version in the folder
+    -l es-419            the default game language (a code or a name)
+    --serial <device>    the adb device, when more than one is connected
+    --no-push            build the APK only (a game without a profile is first built this way)
+    --push-only          install the app and copy a game built before, without building
+python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
+```
+
+The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
+
+## Seeing what a game draws
+
+When a game shows a black or wrong picture, these files in `Android/data/org.nxnative.android/files/` ask the running game for diagnostics (each is checked every
+30 frames and removed when taken; `adb shell touch <path>` creates one):
+
+- `shot_now`: the next presented frame as a PNG in `dump/` (`DM_NVN_SHOT=<frame>[,<frame>...]:<path>` in `env.txt` does the same for given frames).
+- `dump_now`: every render target of one frame, after each pass, as `.raw` and `.png` in `dump/`, with each draw's shaders and bound textures in the log.
+- `threads_now`: every game thread's state, what it waits on and its backtrace, in the log (for a game that stops moving on).
+
+## What the Android port changed
+
+The iOS / Mac host runs on Android with stand-ins for the Darwin interfaces it calls (`dm/android/compat`); the guest's thread slots go through the x18 register (the
+rewriter emits `mov xN, x18` for `DM_TARGET=android`). NVN is replayed on Vulkan (`dm/android/gfx_vk.c`, `gfx_vk_draw.inc`): textures (BC decoded on the CPU where the
+GPU lacks it), copies, clears, draws, compute, indirect draws, transform feedback, queries and timestamps, submitted in chunks so the GPU works while the CPU records;
+shaders are translated with the project's translator and adjusted for Android drivers (`dm/android/tools/spv_android.py`). Audio goes through AAudio, movies through
+MediaCodec. Details of the port: [dm/android/README.md](dm/android/README.md).
+
+Problems found on the way, each with its cause and fix in the reference ([rendering](docs/reference/rendering.md#android-vulkan-replay), [memory](docs/reference/memory.md),
+[NVN objects](docs/reference/nvn-objects.md)):
+
+- **Wrong pictures:** the Adreno driver misreading dynamic vector components in uniform buffers (vertical stripes); render targets attached in their sRGB view format
+  (washed-out colours); `char` unsigned on Android (noise in clouds); separate textures read as "no texture" because the texture and sampler banks are packed into one
+  field (Danganronpa V3's black screen); a second NVN device resetting the window origin (an upside-down picture); a 3D colour-grading LUT drawn a slice at a time into
+  one slice (Bowser's Fury's blue scene).
+- **Crashes:** the thread stack reported with bionic's guard page, which Unity's garbage collector scanned (Danganronpa V3 at boot); `pthread_exit` run on a game
+  thread's small stack (Bowser's Fury after a few seconds).
+- **Speed:** syncs limited to what a draw reads, passes kept open, early and mid-pass submissions, constant buffers copied only as far as the shader reads, pipeline keys
+  built from the state fields, a capped pipeline prebuild; *Game time* holds the audio to the game's frames for levels timed to the music.
 
 ---
-
 
 # nxnative
 
@@ -279,6 +346,8 @@ The IPA appears in the same folder (here `~/Games/MarioWonder/SMBWMobile.ipa`). 
 To play on a Mac with Apple silicon instead, `--platform mac-app` packs a Mac app of the game that you open from Finder ([A Mac app](docs/development.md#a-mac-app)). It shows the game's settings in a window before the game starts ([The Mac settings window](docs/settings.md#the-mac-settings-window)).
 
 With an Apple developer account you can instead build and install from Xcode: `--prepare-xcode` makes an Xcode project for the game rather than an IPA ([Build and run on a device with Xcode](docs/development.md#build-and-run-on-a-device-with-xcode)).
+
+**Android.** To play on an Android phone instead, see [the top of this page](#nxnative-android): a desktop app packs the game and installs it on the phone.
 
 ## Play
 

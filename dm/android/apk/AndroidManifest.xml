@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- nxnative for Android: a NativeActivity app; the host is lib/arm64-v8a/libdmhost.so (dm/android/front_android.c), the touch controls and the text box are in classes.dex (dm/android/java) -->
+<!-- nxnative for Android: a launcher of the games on the phone and a NativeActivity that runs one. lib/arm64-v8a/ holds a host per game, libdmhost_<title ID>.so
+     (dm/android/front_android.c), and libnxloader.so (dm/android/loader.c), which starts the one the launcher picked; the launcher, the touch controls and the text box
+     are in classes.dex (dm/android/java) -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.nxnative.android" android:versionCode="1" android:versionName="0.1">
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true"/>
@@ -9,12 +11,14 @@
         android:appCategory="game" android:isGame="true" android:resizeableActivity="false">
         <!-- simpleperf from adb shell (CPU profiles of the replay on the phone); no cost at run time -->
         <profileable android:shell="true"/>
-        <activity android:name="android.app.NativeActivity" android:exported="false" android:launchMode="singleTask"
+        <!-- the game, in a process of its own: a host is loaded once per process, so every launch (another game too) is a fresh one -->
+        <!-- in a task of its own (taskAffinity): Launcher.endGame removes it whole, so the next game starts from its own intent, not the record of the one closed -->
+        <activity android:name="android.app.NativeActivity" android:exported="false" android:launchMode="singleTask" android:process=":game" android:taskAffinity="org.nxnative.android.game"
             android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
-            <meta-data android:name="android.app.lib_name" android:value="dmhost"/>
+            <meta-data android:name="android.app.lib_name" android:value="nxloader"/>
         </activity>
-        <!-- the settings screen before the game (dm/android/java Launcher.java): the app's entry; Play starts the NativeActivity -->
+        <!-- the launcher (dm/android/java Launcher.java): the app's entry, the games on the phone, then a game's settings; Play starts the NativeActivity -->
         <activity android:name="org.nxnative.android.Launcher" android:exported="true"
             android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">

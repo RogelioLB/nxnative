@@ -248,6 +248,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** the host reports each loaded module's real layout and reports other host memory as free (`hle_svc.c`).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) (its note lists it among the host changes first needed there). IL2CPP throws a C++ exception for every managed exception, so Unity games need this; Mario ([Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md)) never threw.
 
+### The host thread's stack reported without its guard page (Android)
+
+- **Symptom:** Android only: `CRASH sig=11` right after `nnMain` and the RomFS mount, in a Unity game's conservative GC mark loop (`prfum pldl1strm` then `ldr x24, [x20, #0x10]`, compared with the heap bounds), at a page-aligned address about 8 MB below the main thread's `sp`.
+- **Cause:** `svcQueryMemory` reports the host thread's stack as the guest main thread's stack (state Stack), from `pthread_get_stackaddr_np` / `pthread_get_stacksize_np`. Darwin gives the usable stack; the Android shim (`dm_android_stack_info`, `plat_android.c`) took bionic's `pthread_attr_getstack`, whose range for a `pthread_create` thread starts at the mapping, guard page included. Unity's GC scans the whole stack the SDK recorded and read the guard page.
+- **Fix:** `dm_android_stack_info` leaves out `pthread_attr_getguardsize` bytes at the bottom, so the range is the usable stack as on Darwin.
+- **Found on:** Danganronpa V3: Killing Harmony Anniversary Edition (010063F014176000, provisional profile, Unity, SDK 10), `main+0x2194c4` on a POCO X5 5G (Adreno 619).
+
 ### `MapPhysicalMemory` in 16 KB host pages
 
 - **Symptom:** `MapPhysicalMemory` faults on part of a page.
@@ -299,6 +306,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Cause:** host hooks run on the calling guest thread's stack. Super Mario 3D World's save thread has an 8 KB stack (CreateThread stack top `0x…9fe0`, fault `0x21a0` below it), and the file system hooks size their path buffers by PATH_MAX: one file open takes 6–7 KB (`-fstack-usage`: `OpenFile` 1.3 KB → `host_path_ex` 1.9 KB → `path_component` 3.2 KB); on hardware the same call is one IPC. In Breath of the Wild a host NVN call did Metal work on a game thread with a small stack: `nvnQueueSubmitCommands` replays the frame, and ending a render pass made the driver compile its fast-clear blit program on the calling thread.
 - **Fix:** every hook in `hle_fs.c` now registers through `HLE_FORCE_BIG` (`hle.h`): a compile-time stub loads the implementation into x16 and jumps to `dm_bigstack_enter` (`hle_bigstack.c`), which moves the call to a per-thread 512 KB host stack (with a guard page) when sp lies in the guest address block, passing x0–x8 and d0–d7 through. Only for functions with register arguments only (no variadic or stack arguments). iOS forbids generating code at run time, so the stubs are static. NVN functions are not registered through `HLE_FORCE`, so they got their own big-stack entry: every implemented NVN function except the `nvnCommandBuffer*` recording calls goes through `nvn_big_entry` (`nvn_entry.S`), which finds the implementation by slot and hands it to `dm_bigstack_enter` ([NVN entry points on the big host stack](nvn-objects.md#nvn-entry-points-on-the-big-host-stack)).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (file system hooks); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (NVN entry points).
+
+### A guest thread's exit on its own small stack
+
+- **Symptom:** SIGSEGV inside the libc's `pthread_exit` (Android: bionic, jemalloc under a key destructor), at an address just below `sp`, some seconds into a game, when one of its threads exits.
+- **Cause:** `ExitThread` called `pthread_exit` on the guest thread's stack, which the game sizes (some are a few KiB); the libc runs the thread's key destructors and frees its memory there, and bionic's path is deep enough to run off a small stack.
+- **Fix:** `thr_main` records the top of the host thread's own stack (its frame, never returned to) before entering the guest, and `thread_exit` moves `sp` there before calling `pthread_exit` (`hle_thread.c`, arm64).
+- **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md), on Android.
 
 ### Deferred-release drain without an autorelease pool
 

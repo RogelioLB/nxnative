@@ -113,15 +113,21 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
 NVN(nvnDeviceBuilderSetFlags, void, NVNdeviceBuilder *b, int f) { ((dev_builder_t *)b)->flags = f; }
+// The window origin and depth mode are a device's own; the replay has one of each, so it follows the first live device (the game's renderer, which made the window).
+// A further device keeps its modes to itself: Danganronpa V3 (Unity) initialized a second one when its opening movie ended, which reset the origin to lower left and
+// turned the picture upside down. When the first is finalized, the next device initialized takes its place
+static dev_t_ *g_main_dev;
+static int dev_main(const NVNdevice *d) { return (const dev_t_ *)d == g_main_dev; }
 NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
-    o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
-    mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
+    o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT;   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
+    if (!g_main_dev) { g_main_dev = o; mtl_set_origin_lower_left(1); mtl_set_depth_zero(0); }   // NVN's default depth mode: near = -w (GL)
+    else LOG("[nvn] DeviceInitialize %p: a second device (the first, %p, is live): its window origin and depth mode stay its own", (void *)d, (void *)g_main_dev);
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
     return 1;
 }
-NVN(nvnDeviceFinalize, void, NVNdevice *d) { ((dev_t_ *)d)->magic = 0; }
+NVN(nvnDeviceFinalize, void, NVNdevice *d) { ((dev_t_ *)d)->magic = 0; if (dev_main(d)) g_main_dev = NULL; }
 NVN(nvnDeviceGetProcAddress, PFNNVNGENERICFUNCPTRPROC, const NVNdevice *d, const char *name) {
     (void)d; return (PFNNVNGENERICFUNCPTRPROC)nvn_lookup(name);
 }
@@ -182,8 +188,8 @@ NVN(nvnDeviceGetSeparateSamplerHandle, NVNseparateSamplerHandle, const NVNdevice
 NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACKPROC cb, void *data, uint32_t enable) {
     dev_t_ *o = (dev_t_ *)d; o->dbg_cb = B(enable) ? (void *)cb : NULL; o->dbg_data = data;
 }
-NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; mtl_set_origin_lower_left(m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT); LOG("[nvn] window origin %s", m ? "upper left (as D3D / Metal)" : "lower left (GL)"); }
-NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; mtl_set_depth_zero(m != 0); LOG("[nvn] depth mode %s", m ? "near=0 (as D3D / Metal)" : "near=-w (GL)"); }
+NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; if (dev_main(d)) mtl_set_origin_lower_left(m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT); LOG("[nvn] window origin %s", m ? "upper left (as D3D / Metal)" : "lower left (GL)"); }
+NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; if (dev_main(d)) mtl_set_depth_zero(m != 0); LOG("[nvn] depth mode %s", m ? "near=0 (as D3D / Metal)" : "near=-w (GL)"); }
 // Pokémon Sword sets neither mode and reads both, keeping NVN's defaults (lower-left origin, near = -w); the two were red stubs
 NVN(nvnDeviceGetWindowOriginMode, NVNwindowOriginMode, const NVNdevice *d) { return ((const dev_t_ *)d)->origin; }
 NVN(nvnDeviceGetDepthMode, NVNdepthMode, const NVNdevice *d) { return ((const dev_t_ *)d)->depth_mode; }

@@ -34,6 +34,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** the host never reports a ZCull storage size of 0 (`hle_nvn.c` `zcull_size`).
 - **Found on:** [Cuphead](../../dm/games/0100A5C00D162000/README.md). Found by tracking the allocator from observation gates (`OBS` in its `patches.py`) on its free-list push and after its map insert, checking at every event that each block allocated so far was still in the game's map.
 
+### A second device's window origin and depth mode
+
+- **Symptom:** the picture turns upside down partway through, here when the opening movie ends; the log shows `window origin → lower left` with no `[nvn] window origin` line from the game before it.
+- **Cause:** the window origin and depth mode are a device's own, but the replay keeps one of each, and `nvnDeviceInitialize` set both to NVN's defaults (lower left, near = -w). Unity initialized a second device after its movie, which reset the origin the first device had set to upper left: the viewport stopped flipping while the present still flipped.
+- **Fix:** `hle_nvn.c`: the replay follows the first live device (`g_main_dev`); a further device keeps its origin and depth mode to itself (logged `a second device`), and when the first is finalized the next one initialized takes its place.
+- **Found on:** Danganronpa V3: Killing Harmony Anniversary Edition (010063F014176000, provisional profile, Unity, SDK 10), on Android.
+
 ## Memory pools
 
 ### Heaps cut from a pool at alignment relative to its GPU address

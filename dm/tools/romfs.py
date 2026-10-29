@@ -91,6 +91,7 @@ def is_image(path):
 
 def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
+    if _os.sep != '/': p = p.replace(_os.sep, '/')   # Windows: abspath gives backslashes; the image's own paths use '/'
     parts = p.split('/')
     for i, part in enumerate(parts):
         if not part.endswith('.img'): continue
@@ -111,9 +112,14 @@ def source(extraction):
 _fd_ranges = {}
 
 
+def _pread(fd, size, offset):   # Windows has no os.pread; each _File owns its fd, so seek-then-read is safe there
+    if hasattr(_os, 'pread'): return _os.pread(fd, size, offset)
+    _os.lseek(fd, offset, _os.SEEK_SET); return _os.read(fd, size)
+
+
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = _os.open(image.path, _os.O_RDONLY | getattr(_os, 'O_BINARY', 0))   # Windows opens text mode otherwise
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -127,7 +133,7 @@ class _File(io.RawIOBase):
         self.pos = pos; return pos
     def readinto(self, buffer):
         size = min(len(buffer), max(0, self.length - self.pos))
-        data = _os.pread(self.fd, size, self.start + self.pos)
+        data = _pread(self.fd, size, self.start + self.pos)
         buffer[:len(data)] = data; self.pos += len(data)
         return len(data)
     def close(self):

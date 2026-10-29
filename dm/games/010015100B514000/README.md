@@ -119,6 +119,8 @@ General host changes first needed here; each applies to every game:
 - [Pipeline keys built from the state objects' fields](../../../docs/reference/rendering.md#pipeline-keys-built-from-the-state-objects-fields) (Android)
 - [Long passes sent to the GPU in pieces](../../../docs/reference/rendering.md#long-passes-sent-to-the-gpu-in-pieces) (Android)
 - [Constant buffers copied only as far as the shader reads](../../../docs/reference/rendering.md#constant-buffers-copied-only-as-far-as-the-shader-reads) (Android)
+- [Geometry kept on the GPU between frames](../../../docs/reference/rendering.md#geometry-kept-on-the-gpu-between-frames) (Android: the world map with the camera far out)
+- [Read-only storage resources in the vertex pipeline](../../../docs/reference/rendering.md#read-only-storage-resources-in-the-vertex-pipeline) (Android, Mali-G76: open, gameplay black on a POCO M5s, not yet tested with the fix)
 
 ## Open
 

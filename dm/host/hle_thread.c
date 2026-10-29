@@ -50,6 +50,7 @@ typedef struct event { int signaled; int refs; } event_t;
 typedef struct thr {
     uint32_t handle; uint64_t id;
     uint64_t entry, arg, stack_top; int prio, core; uint64_t mask;
+    uintptr_t host_sp;   // the host thread's own stack where thr_main entered the guest (thread_exit runs pthread_exit there)
     uint64_t born_ns, exit_ns; uint32_t born_tick, exit_tick;   // Time of creation / exit and the game tick at that time (for the state dump: did the job worker exit before the stall)
     int started, exited, cancel;
     pthread_t pt; pthread_cond_t cv;
@@ -295,6 +296,7 @@ static void *thread_main(void *p) {
     guest_thread_init();
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); pthread_setname_np(hn); }   // the guest's name (set before StartThread) for sample / Instruments
+    t->host_sp = (uintptr_t)__builtin_frame_address(0) & ~(uintptr_t)15;   // below it only this frame, which is never returned to
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
 }
@@ -305,7 +307,9 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
 static void wake_sync_waiters(const void *obj);
+static void exit_on_host(void) { pthread_exit(NULL); }
 static void thread_exit(thr_t *t) {
+    uintptr_t hsp = t->host_sp;   // read before t may be freed below
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     pthread_mutex_lock(&G);
@@ -316,6 +320,11 @@ static void thread_exit(thr_t *t) {
     pthread_mutex_unlock(&G);
 #ifdef __ANDROID__
     dm_slots_x18_restore();   // bionic's thread exit runs with its own x18 (dm.h); the slot block is freed by its key destructor
+#endif
+#if defined(__aarch64__)
+    // pthread_exit on the host thread's own stack, not the guest's: the libc runs the key destructors and frees memory there, and some guest stacks are a few KiB.
+    // Bowser's Fury on Android: SIGSEGV just below sp inside bionic's pthread_exit (jemalloc under a key destructor) when a thread with a small stack exited
+    if (hsp) __asm__ volatile("mov sp, %0\n\tmov x29, #0\n\tblr %1\n\tbrk #0" :: "r"(hsp), "r"(exit_on_host) : "memory");
 #endif
     pthread_exit(NULL);
 }

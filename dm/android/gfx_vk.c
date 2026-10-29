@@ -24,6 +24,7 @@
 #include "nvn_deswizzle.h"
 #include "nvn_fmt_mtl.h"
 #include "gfx_vk.h"
+#include "spv_readonly.h"
 #include <stdatomic.h>
 #include <math.h>
 #define BCDEC_IMPLEMENTATION
@@ -551,7 +552,8 @@ static vtex *vt_create(const tex_t *t) {
     VkImageCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = v->type, .format = f, .extent = {v->w, v->h, v->d}, .mipLevels = v->levels,
         .arrayLayers = v->layers, .samples = v->samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .flags = ((t->d.target == 8 || t->d.target == 9) && v->layers % 6 == 0 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) |
-                                                           (u & VK_IMAGE_USAGE_STORAGE_BIT || mut ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0)};   // storage: viewed in the format a shader declares (gfx_vk_draw.inc storage_view); colour: a texture view's format
+                                                           (u & VK_IMAGE_USAGE_STORAGE_BIT || mut ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0) |   // storage: viewed in the format a shader declares (gfx_vk_draw.inc storage_view); colour: a texture view's format
+                                                           (v->type == VK_IMAGE_TYPE_3D && (u & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0)};   // a 3D target is drawn a slice at a time through 2D views (gfx_vk_draw.inc rp_start)
     if (v->samples > 1) ic.mipLevels = 1;
     if (vkCreateImage(g_vk.dev, &ic, NULL, &v->img) != VK_SUCCESS) { RED_ONCE(15, "vkCreateImage %ux%ux%u ×%u levels %u format %d failed", v->w, v->h, v->d, v->layers, v->levels, f); free(v); return NULL; }
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_vk.dev, v->img, &mr);
@@ -565,6 +567,7 @@ static vtex *vt_create(const tex_t *t) {
 // Upload a texture's guest storage (deswizzled on the CPU; BC decoded when the GPU lacks it). The dirty-page stamp is taken and the pages protected before reading (nvn_mtl.m pkg_upload_)
 // texture uploads' CPU time (deswizzle, BC decode); pipelines made and their creation time: the long-frame lines (hle_nvn.c)
 static _Atomic uint64_t g_up_ns, g_pso_made, g_pso_ns;
+static _Atomic uint64_t g_mod_made, g_mod_ns, g_cpso_made, g_cpso_ns;   // shader modules (variants too) and compute pipelines made, and their creation time (gfx_vk_draw.inc): the driver compiles in both
 static int vt_upload_(vtex *v, const tex_t *t);
 static int vt_upload(vtex *v, const tex_t *t) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int r = vt_upload_(v, t); atomic_fetch_add(&g_up_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); return r; }
 static int vt_upload_(vtex *v, const tex_t *t) {
@@ -907,6 +910,7 @@ static void clear_tex(const p_clear_tex *ct) {
     vkCmdClearColorImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &rg); cb_barrier();
 }
 
+static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_draw.inc"
 
 // ---------------- Submission ----------------
@@ -937,6 +941,14 @@ static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); return nvn_timestamp_
 enum { EARLY_DRAWS = 48, MID_DRAWS = 64 };   // MID_DRAWS: a chunk that long goes to the GPU before the next draw, in the middle of a pass (the pass is begun again with its targets
 // loaded): Super Mario Bros. Wonder draws most of a frame in two passes of about 140 draws, which reached the GPU only when each ended, and the game then waited for the GPU
 // (SyncWait 12.5 ms a wait) after recording 23 ms of draws
+// g_mid_draws: MID_DRAWS, or a file named vk_mid beside $DM_DUMP_DIR holding a number, read every 30 presents (a test of the split's cost: each piece loads and stores the pass's targets)
+static int g_mid_draws = MID_DRAWS;
+static void mid_poll(uint64_t presents) {
+    const char *dir = getenv("DM_DUMP_DIR"); if (!dir || presents % 30) return;
+    char p[700]; snprintf(p, sizeof p, "%s/../vk_mid", dir); FILE *f = fopen(p, "r"); if (!f) return;
+    int v = 0; if (fscanf(f, "%d", &v) == 1 && v > 0 && v != g_mid_draws) { LOG("[vk] chunks sent in the middle of a pass after %d draws (was %d)", v, g_mid_draws); g_mid_draws = v; }
+    fclose(f);
+}
 void mtl_exec(const uint8_t *p) {
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
@@ -980,9 +992,9 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_COLOR: clear_color((const p_clear_color *)a); break;
             case OP_CLEAR_DS: clear_ds((const p_clear_ds *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
-            case OP_DRAW: if (C && C->ndraw >= MID_DRAWS && !vk_safe()) flush();
+            case OP_DRAW: if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
                 { p_draw t; if (!vk_draw(draw_rec(a, h.size, &t), NULL)) g_draws_dropped++; break; }   // short records: draw_rec (nvn_obj.h)
-            case OP_DRAW_IDX: if (C && C->ndraw >= MID_DRAWS && !vk_safe()) flush();
+            case OP_DRAW_IDX: if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
             default: draw_state_op(h.op, a); break;   // state for draws (programs, bindings, render state)
@@ -1022,6 +1034,107 @@ int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait(fence, t
 void mtl_finish(void) { uint64_t f = atomic_load(&g_fence); while (!mtl_wait(f, 1000000000ull)) {} }   // everything submitted so far is done
 void mtl_drain(void) { mtl_finish(); pthread_mutex_lock(&g_cmu); while (g_fifo_n) pthread_cond_wait(&g_ccv, &g_cmu); pthread_mutex_unlock(&g_cmu); }
 
+// ---------------- Screenshots and PNG ----------------
+// A minimal PNG writer (8-bit RGB, deflate's stored blocks: no compression library in the app) for screenshots and the pass dump's targets
+static uint32_t png_crc(uint32_t c, const uint8_t *p, size_t n) {
+    static uint32_t t[256];
+    if (!t[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t x = i; for (int k = 0; k < 8; k++) x = x & 1 ? 0xedb88320u ^ (x >> 1) : x >> 1; t[i] = x; }
+    c = ~c; while (n--) c = t[(c ^ *p++) & 0xff] ^ (c >> 8); return ~c;
+}
+static void be32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+static void png_chunk(FILE *f, const char *type, const uint8_t *d, size_t n) {
+    uint8_t h[8]; be32(h, (uint32_t)n); memcpy(h + 4, type, 4); fwrite(h, 1, 8, f); if (n) fwrite(d, 1, n, f);
+    uint8_t c[4]; be32(c, png_crc(png_crc(0, (const uint8_t *)type, 4), d, n)); fwrite(c, 1, 4, f);
+}
+static int png_write(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h) {   // rgb: w * h * 3 bytes, top row first
+    size_t row = (size_t)w * 3 + 1, raw = row * h, nblk = (raw + 65534) / 65535, zn = 2 + raw + 5 * nblk + 4;
+    uint8_t *z = malloc(zn); FILE *f = z ? fopen(path, "wb") : NULL;
+    if (!f) { free(z); return 0; }
+    uint8_t *o = z; *o++ = 0x78; *o++ = 0x01;
+    uint32_t a = 1, b = 0; size_t left = raw, pos = 0;   // the stored blocks cut the filtered rows (filter byte 0 + pixels) at 65535 bytes; adler32 over the same bytes
+    while (left) {
+        uint16_t n = (uint16_t)(left < 65535 ? left : 65535); left -= n;
+        *o++ = left ? 0 : 1; *o++ = (uint8_t)n; *o++ = (uint8_t)(n >> 8); *o++ = (uint8_t)~n; *o++ = (uint8_t)(~n >> 8);
+        for (uint16_t i = 0; i < n; i++, pos++) { size_t y = pos / row, x = pos % row; uint8_t v = x ? rgb[y * (row - 1) + x - 1] : 0; *o++ = v; a = (a + v) % 65521; b = (b + a) % 65521; }
+    }
+    be32(o, b << 16 | a); o += 4;
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}; fwrite(sig, 1, 8, f);
+    uint8_t ih[13]; be32(ih, w); be32(ih + 4, h); ih[8] = 8; ih[9] = 2; ih[10] = ih[11] = ih[12] = 0; png_chunk(f, "IHDR", ih, 13);
+    png_chunk(f, "IDAT", z, (size_t)(o - z)); png_chunk(f, "IEND", NULL, 0);
+    int ok = !ferror(f); fclose(f); free(z); return ok;
+}
+static float uf_f(uint32_t bits, int mb) { uint32_t e = bits >> mb, m = bits & ((1u << mb) - 1); return e == 31 ? 1.0f : e ? ldexpf((float)(m | 1u << mb), (int)e - 15 - mb) : ldexpf((float)m, -14 - mb); }   // B10G11R11's unsigned floats (5-bit exponent)
+static uint8_t f_u8(float v) { return v <= 0 || v != v ? 0 : v >= 1 ? 255 : (uint8_t)(v * 255.0f + 0.5f); }
+static int px_rgb(VkFormat f, const uint8_t *s, uint8_t *o) {   // one texel → 8-bit RGB (float formats clamped to [0, 1], no tone mapping); 0: format not converted
+    uint32_t u; memcpy(&u, s, 4);
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_A8B8G8R8_UNORM_PACK32: case VK_FORMAT_A8B8G8R8_SRGB_PACK32: o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; return 1;
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: o[0] = s[2]; o[1] = s[1]; o[2] = s[0]; return 1;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: o[0] = (uint8_t)((u & 1023) >> 2); o[1] = (uint8_t)((u >> 10 & 1023) >> 2); o[2] = (uint8_t)((u >> 20 & 1023) >> 2); return 1;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: o[0] = f_u8(uf_f(u & 2047, 6)); o[1] = f_u8(uf_f(u >> 11 & 2047, 6)); o[2] = f_u8(uf_f(u >> 22, 5)); return 1;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: { uint16_t c[3]; memcpy(c, s, 6); for (int i = 0; i < 3; i++) o[i] = f_u8(half_f(c[i])); return 1; }
+    case VK_FORMAT_R32G32B32A32_SFLOAT: { float c[3]; memcpy(c, s, 12); for (int i = 0; i < 3; i++) o[i] = f_u8(c[i]); return 1; }
+    case VK_FORMAT_R8_UNORM: o[0] = o[1] = o[2] = s[0]; return 1;
+    case VK_FORMAT_R16_SFLOAT: o[0] = o[1] = o[2] = f_u8(half_f((uint16_t)u)); return 1;
+    case VK_FORMAT_R32_SFLOAT: { float c; memcpy(&c, s, 4); o[0] = o[1] = o[2] = f_u8(c); return 1; }
+    default: return 0;
+    }
+}
+// texels (w * h, tightly packed, bpp bytes each) → PNG, the rectangle x, y, cw, ch of them; flip: bottom row first (a lower-left origin)
+static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip) {
+    uint8_t t[3], z[16] = {0}; if (!px_rgb(f, z, t)) return 0;
+    uint8_t *rgb = malloc((size_t)cw * ch * 3); if (!rgb) return 0;
+    for (uint32_t r = 0; r < ch; r++) { const uint8_t *s = p + ((size_t)(y + (flip ? ch - 1 - r : r)) * w + x) * bpp; for (uint32_t c = 0; c < cw; c++) px_rgb(f, s + (size_t)c * bpp, rgb + ((size_t)r * cw + c) * 3); }
+    int ok = png_write(path, rgb, cw, ch); free(rgb); return ok;
+}
+// The presented image (its crop rectangle) → PNG, with the replay's lock held: copied to a staging buffer and waited for
+static void shot_write(vtex *v, const int crop[4], const char *path) {
+    int bpp = fmt_bytes(v->fmt); uint8_t t[3], z[16] = {0};
+    if (!bpp || !px_rgb(v->fmt, z, t)) { LOG("[RED] screenshot %s: format %d not converted", path, v->fmt); return; }
+    stg_t s; if (!stg_new(&s, (VkDeviceSize)v->w * v->h * bpp)) { LOG("[RED] screenshot %s: no staging buffer", path); return; }
+    VkCommandBuffer c = cb(); if (!c) { stg_free(&s); return; }
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    VkBufferImageCopy r = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {v->w, v->h, 1}};
+    vkCmdCopyImageToBuffer(c, v->img, VK_IMAGE_LAYOUT_GENERAL, s.b, 1, &r);
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    all_wait();
+    uint32_t x = 0, y = 0, w = v->w, h = v->h;
+    if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] >= 0 && crop[1] >= 0 && (uint32_t)(crop[0] + crop[2]) <= v->w && (uint32_t)(crop[1] + crop[3]) <= v->h) { x = (uint32_t)crop[0]; y = (uint32_t)crop[1]; w = (uint32_t)crop[2]; h = (uint32_t)crop[3]; }
+    uint64_t sum = 0; for (VkDeviceSize i = 0; i < s.n; i += 4 * 97) sum += s.p[i] + s.p[i + 1 < s.n ? i + 1 : i];   // a coarse "is anything there" figure for the log
+    if (png_texels(path, v->fmt, bpp, s.p, v->w, x, y, w, h, g_origin_ll)) LOG("[shot] frame %llu → %s (%ux%u of %ux%u, vk%d, sampled byte sum %llu)", (unsigned long long)atomic_load(&g_presents) + 1, path, w, h, v->w, v->h, v->fmt, (unsigned long long)sum);
+    else LOG("[RED] screenshot %s: cannot write", path);
+    stg_free(&s);
+}
+// Requests: dm_gfx_shot_at (k presents from now), DM_NVN_SHOT=<frame>[,<frame>...]:<path> (%d = the frame), and a file named shot_now beside $DM_DUMP_DIR
+// (checked every 30 presents; removed): the next present to <DM_DUMP_DIR>/shot_<frame>.png
+#define SHOTQ_MAX 16
+static struct { uint64_t frame; char path[700]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
+static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
+static void shot_queue(uint64_t frame, const char *path) {
+    pthread_mutex_lock(&g_shotq_mu);
+    if (g_nshotq < SHOTQ_MAX) { g_shotq[g_nshotq].frame = frame; snprintf(g_shotq[g_nshotq].path, sizeof g_shotq[0].path, "%s", path); g_nshotq++; }
+    else LOG("[RED] more than %d screenshot requests: %s dropped", SHOTQ_MAX, path);
+    pthread_mutex_unlock(&g_shotq_mu);
+}
+static void shot_poll(uint64_t presents, vtex *v, const int crop[4]) {   // presents: before this one; with the replay's lock held
+    static long frames[256]; static int nf = -1; static const char *fpath;
+    if (nf < 0) { nf = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
+        if (c) { fpath = c + 1; for (const char *q = e; q < c && nf < 256; q = strchr(q, ',') && strchr(q, ',') < c ? strchr(q, ',') + 1 : c) frames[nf++] = atol(q); } }
+    const char *dir = getenv("DM_DUMP_DIR"); char p[700];
+    if (dir && !(presents % 30)) { snprintf(p, sizeof p, "%s/../shot_now", dir);
+        if (!access(p, F_OK)) { unlink(p); mkdir(dir, 0777); snprintf(p, sizeof p, "%s/shot_%llu.png", dir, (unsigned long long)presents + 1); shot_queue(presents + 1, p); }
+        snprintf(p, sizeof p, "%s/../threads_now", dir);   // a file named threads_now: every guest thread's state, what it waits on and its backtrace (a game that stopped moving on)
+        if (!access(p, F_OK)) { unlink(p); void svc_thread_dump(void); LOG("[threads] threads_now seen at present %llu", (unsigned long long)presents); svc_thread_dump(); } }
+    if (!v) return;
+    for (int i = 0; i < nf; i++) if ((long)presents + 1 == frames[i]) { char path[700]; snprintf(path, sizeof path, fpath, (int)presents + 1); shot_write(v, crop, path); }
+    pthread_mutex_lock(&g_shotq_mu);
+    for (int i = 0; i < g_nshotq;) if (presents + 1 >= g_shotq[i].frame) { char path[700]; memcpy(path, g_shotq[i].path, sizeof path); g_shotq[i] = g_shotq[--g_nshotq];
+        pthread_mutex_unlock(&g_shotq_mu); shot_write(v, crop, path); pthread_mutex_lock(&g_shotq_mu); } else i++;
+    pthread_mutex_unlock(&g_shotq_mu);
+}
+void dm_gfx_shot_at(long k, const char *path) { shot_queue(atomic_load(&g_presents) + 1 + (uint64_t)(k > 0 ? k : 0), path); }
+
 // ---------------- Presents ----------------
 static pthread_mutex_t g_frame_mu = PTHREAD_MUTEX_INITIALIZER; static vkb_frame g_frame; static uint64_t g_frame_serial;
 int vkb_frame_lock(vkb_frame *f) { pthread_mutex_lock(&g_frame_mu); if (!g_frame.img) { pthread_mutex_unlock(&g_frame_mu); return 0; } *f = g_frame; return 1; }
@@ -1031,10 +1144,12 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     static uint64_t next;
     pthread_mutex_lock(&g_bk);
     vtex *v = vt_get(t); flush();
-    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents));
+    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
-    if (dump_on()) { if (v) LOG("[dump] frame %ld presents ser=%llu %ux%u vk%d", dump_frame(), (unsigned long long)v->serial, v->w, v->h, v->fmt); all_wait(); dump_write(); }
+    if (dump_on()) { if (v) LOG("[dump] frame %ld presents ser=%llu %ux%u vk%d", dump_frame(), (unsigned long long)v->serial, v->w, v->h, v->fmt); all_wait(); dump_write();
+        if (v) { char p[700]; snprintf(p, sizeof p, "%s/f%ld_present.png", getenv("DM_DUMP_DIR") ? getenv("DM_DUMP_DIR") : ".", dump_frame()); shot_write(v, crop, p); } }
+    shot_poll(atomic_load(&g_presents), v, crop);
     if (v) {
         pthread_mutex_lock(&g_frame_mu);
         g_frame = (vkb_frame){v->img, v->fmt, v->w, v->h, {0, 0, (int)v->w, (int)v->h}, atomic_load(&g_presents) + 1, g_origin_ll}; g_frame_serial = v->serial;
@@ -1063,7 +1178,7 @@ int mtl_snap_on(void) { return 0; }
 uint64_t mtl_snap_acquire_wait(void) { return 0; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_set_depth_zero(int on) { g_depth_zero = on; }
-void mtl_set_origin_lower_left(int on) { g_origin_ll = on; }
+void mtl_set_origin_lower_left(int on) { if (g_origin_ll != on) LOG("[vk] window origin → %s (presents so far %llu)", on ? "lower left" : "upper left", (unsigned long long)atomic_load(&g_presents)); g_origin_ll = on; }   // as nvn_mtl.m logs it
 void mtl_set_queue_origin_lower_left(int on) { g_queue_ll = on != 0; }
 void mtl_reg_image(int id, const tex_t *t, const view_t *v) {   // RegisterImage declares image use even when the builder left IMAGE out (as nvn_mtl.m)
     if (!t) { mtl_reg_tex(id, NULL, v); return; }
@@ -1093,8 +1208,9 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) { (void)f; (void)t0; (v
 void mtl_ub_present(double iv) { (void)iv; }
 uint64_t mtl_upload_ns_take(void) { return atomic_exchange(&g_up_ns, 0); }
 uint64_t mtl_upload_gpu_ns_take(void) { return 0; }
-void mtl_create_stats(uint64_t *a, uint64_t *b) { *a = 0; *b = atomic_load(&g_pso_made); }
-void mtl_create_ns(uint64_t *a, uint64_t *b) { *a = 0; *b = atomic_load(&g_pso_ns); }
+// the long-frame line's "new pipelines + shader libraries": graphics and compute pipelines, and shader modules (Vulkan's counterpart of Metal's libraries)
+void mtl_create_stats(uint64_t *a, uint64_t *b) { *a = atomic_load(&g_mod_made); *b = atomic_load(&g_pso_made) + atomic_load(&g_cpso_made); }
+void mtl_create_ns(uint64_t *a, uint64_t *b) { *a = atomic_load(&g_mod_ns); *b = atomic_load(&g_pso_ns) + atomic_load(&g_cpso_ns); }
 void mtl_hybrid_stats(uint64_t *a, uint64_t *b, uint64_t *c) { *a = *b = *c = 0; }
 void mtl_alloc_stats(uint64_t *a, uint64_t *b, int *c) { *a = *b = 0; *c = 0; }
 void mtl_barrier_stats(uint64_t *a, uint64_t *b) { *a = *b = 0; }
@@ -1113,10 +1229,13 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_view_cur, (unsigned long long)g_view_fly, (unsigned long long)g_view_free, (unsigned long long)g_mem_cur, (unsigned long long)g_mem_fly, (unsigned long long)g_mem_free,
         (unsigned long long)g_flushes);
     LOG("[vk] constant and storage buffer copies: %llu reused, %llu made (cumulative; gfx_vk_draw.inc ucopy)", (unsigned long long)g_ucopy_hit, (unsigned long long)g_ucopy_miss);
+    LOG("[vk] geometry kept on the GPU: %llu index / vertex bindings from kept copies, %llu copies kept (%llu MB now), %llu copied per draw (cumulative; gfx_vk_draw.inc gc_get)",
+        (unsigned long long)g_gc_hit, (unsigned long long)g_gc_made, (unsigned long long)(g_gc_bytes >> 20), (unsigned long long)g_gc_copy);
     { static unsigned long long f0; static uint64_t g0; uint64_t g = atomic_load(&g_gpu_ns);
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all)", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0, (unsigned long long)atomic_load(&g_gpu_chunks));
       f0 = frame; g0 = g; }
-    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, graphics pipelines made %llu (cumulative)", (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_pso_made));
+    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms) (cumulative)", (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports,
+        (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped);
     LOG("[vk] vertex streams read on the GPU from a dispatch's storage buffer: %llu (cumulative)", (unsigned long long)g_fwd);
     LOG("[vk] syncs by site (submitted / in flight): other %llu/%llu, draw %llu/%llu, upload %llu/%llu, t2b %llu/%llu, large copy %llu/%llu, buffer texture %llu/%llu, buffer image %llu/%llu, dispatch %llu/%llu",
@@ -1126,7 +1245,6 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
 void mtl_pso_line(char *out, size_t n) { if (n) out[0] = 0; }
 void mtl_res_stats(char *out, size_t n) { if (n) snprintf(out, n, "textures %u", g_tex.n); }
 uint32_t mtl_present_qos(void) { return 0; }
-void dm_gfx_shot_at(long k, const char *path) { (void)k; LOG("[RED] screenshot %s: not on Android yet", path); }
 void dm_gfx_passdump_next(long n) { (void)n; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_texlist(int target) { (void)target; }

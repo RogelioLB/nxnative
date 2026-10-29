@@ -86,14 +86,17 @@ void crash_off(const char *tag, uint64_t a) {   // Also used by diag.c
 // and a probe's backtrace there used to crash the host
 void dm_backtrace(uint64_t fp) {
     fprintf(stderr, "[dm] bt:");
-    for (int i = 0; i < 32 && fp && !(fp & 7); i++) {
+    // the first 32 frames; a longer chain (a recursion that overflowed the stack) also gets its last 16 (where it began) and its length
+    uint64_t tail[16]; int n = 0;
+    for (; n < 1 << 20 && fp && !(fp & 7); n++) {
         uint64_t w[2]; vm_size_t got = 0;
         if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
         uint64_t nfp = w[0], ra = w[1];
-        off("", ra);
-        if (nfp <= fp) break;
+        if (n < 32) off("", ra); else tail[n % 16] = ra;
+        if (nfp <= fp) { n++; break; }
         fp = nfp;
     }
+    if (n > 32) { fprintf(stderr, " ... (%d frames in all) ...", n); for (int i = n > 48 ? n - 16 : 32; i < n; i++) off("", tail[i % 16]); }
     fputc('\n', stderr);
 }
 // ---------- Page fault hooks (write-protect dirty page tracking) ----------
@@ -159,6 +162,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     fprintf(stderr, " sp=%#llx\n", DM_SS(uc).__sp);
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, DM_SS(uc).__x[i], i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
+    dm_backtrace(DM_SS(uc).__fp);   // first: the most useful line, out before anything below can fail (an Android stack overflow lost everything after the registers)
     // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
     for (int i = 0; i < 29; i++) {
         uint64_t a = DM_SS(uc).__x[i], w[6]; vm_size_t got = 0;
@@ -167,16 +171,19 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
     }
-    dm_backtrace(DM_SS(uc).__fp);
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
     {   uint64_t sp = DM_SS(uc).__sp;   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
         fprintf(stderr, "[dm] fp=%#llx  0x100 bytes below sp:", (unsigned long long)DM_SS(uc).__fp);
-        for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
+        // read without faulting (vm_read_overwrite): on a stack overflow the words below sp are the guard page, and a fault in this handler (SIGSEGV blocked) kills the
+        // process before the lines printed so far reach the log (Android's stderr goes to logcat through a pipe)
+        for (int i = -32; i < 0 && sp && !(sp & 7); i++) { uint64_t v = 0; vm_size_t got = 0; int ok = vm_read_overwrite(mach_task_self(), (vm_address_t)(sp + 8 * i), 8, (vm_address_t)&v, &got) == KERN_SUCCESS;
+            fprintf(stderr, "%s%s", (i + 32) % 4 ? " " : "\n[dm]   ", ok ? "" : "?"); if (ok) fprintf(stderr, "%llx", (unsigned long long)v); }
         fputc('\n', stderr); }
     {   uint64_t sp = DM_SS(uc).__sp; int n = 0;
         fprintf(stderr, "[dm] stack scan sp=%#llx:", (unsigned long long)sp);
         for (int i = -32; i < 512 && n < 24 && sp && !(sp & 7); i++) {
-            uint64_t v = ((uint64_t *)sp)[i]; Dl_info di;
+            uint64_t v = 0; vm_size_t got = 0; Dl_info di;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)(sp + 8 * i), 8, (vm_address_t)&v, &got) != KERN_SUCCESS) continue;
             if (v < 0x100000000ull || (v & 3)) continue;
             int mod = -1; for (int k = 0; k < g_nmod; k++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[k].base; if (v >= b && v < b + g_mod[k].size) mod = k; }
             if (mod >= 0) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, g_mod[mod].name, (unsigned long long)(v - (uint64_t)(uintptr_t)g_mod[mod].base)); n++; }
@@ -184,6 +191,9 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
+#if defined(__ANDROID__)
+    usleep(500000);   // stderr reaches logcat and log.txt through a pipe a reader thread empties (front_android.c log_reader): exiting at once lost all but the first lines
+#endif
     _exit(128 + sig);
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)

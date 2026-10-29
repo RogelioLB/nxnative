@@ -59,9 +59,13 @@ static __thread qos_class_t t_qos;
 int dm_android_qos_set(qos_class_t q) { t_qos = q; setpriority(PRIO_PROCESS, (id_t)gettid(), dm_qos_nice(q)); return 0; }
 qos_class_t dm_android_qos_get(void) { return t_qos ? t_qos : QOS_CLASS_DEFAULT; }
 
+// The usable stack, as Darwin's pthread_get_stackaddr_np / pthread_get_stacksize_np give it. Bionic's range for a pthread_create thread starts at its mapping, guard page(s) included:
+// QueryMemory reported that unreadable page as the start of the main thread's stack, and Unity's conservative GC, which scans the whole stack it was told of, faulted on it
+// at the first collection (Danganronpa V3, main+0x2194c4 under GC mark, an address 8 MB below sp)
 size_t dm_android_stack_info(void **top) {
-    pthread_attr_t a; void *lo = NULL; size_t n = 0;
-    if (!pthread_getattr_np(pthread_self(), &a)) { pthread_attr_getstack(&a, &lo, &n); pthread_attr_destroy(&a); }
+    pthread_attr_t a; void *lo = NULL; size_t n = 0, guard = 0;
+    if (!pthread_getattr_np(pthread_self(), &a)) { pthread_attr_getstack(&a, &lo, &n); pthread_attr_getguardsize(&a, &guard); pthread_attr_destroy(&a); }
+    if (guard < n) { lo = (uint8_t *)lo + guard; n -= guard; }
     *top = (uint8_t *)lo + n; return n;
 }
 

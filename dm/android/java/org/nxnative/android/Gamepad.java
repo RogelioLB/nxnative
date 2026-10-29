@@ -51,7 +51,7 @@ public final class Gamepad extends View {
 
     static final int B_A = 0, B_B = 1, B_X = 2, B_Y = 3, B_LS = 4, B_RS = 5, B_L = 6, B_R = 7, B_ZL = 8, B_ZR = 9, B_PLUS = 10, B_MINUS = 11,
                      B_LEFT = 12, B_UP = 13, B_RIGHT = 14, B_DOWN = 15, B_N = 16;   // the bits of dm_input.h
-    static final int C_NONE = 0, C_STICK = 1, C_DPAD = 2, C_FACE = 3, C_BTN = 4, C_SWAP = 5, C_GAME = 6;
+    static final int C_NONE = 0, C_STICK = 1, C_DPAD = 2, C_FACE = 3, C_BTN = 4, C_SWAP = 5, C_GAME = 6, C_MENU = 7;
     // DmGamepad.m's layout constants (in u; x from the outer edge, the right half mirrors)
     static final float K_ZL_X = 44, K_ZL_Y = 40, K_ZL_R = 26, K_L_X = 44, K_L_Y = 108, K_L_R = 24, K_DROP_TIP = 1.45f, K_CORNER_IN = 0.5f,
         K_FACE_X = 81, K_PAD_Y = 82, K_FACE_GAP = 50, K_FACE_R = 27, K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28, K_SWAP_R = 15,
@@ -66,7 +66,7 @@ public final class Gamepad extends View {
     final long[] owner = new long[64]; final long[] faceOf = new long[64]; final boolean[] down = new boolean[64];
     final float[] px = new float[64], py = new float[64];
     int[] stick = {-1, -1}; float[] stickX = new float[2], stickY = new float[2]; float rcx, rcy;
-    long faceBits, dpadBits, btnBits; boolean swapHeld; int hapticSticks;
+    long faceBits, dpadBits, btnBits; boolean swapHeld, menuHeld, menuGo; int hapticSticks;
     final int[] game = new int[16];   // pointer id holding each finger slot of the game's touch screen, -1 free
     final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), line = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG);
     static final int IDLE = Color.argb(36, 255, 255, 255), ON = Color.argb(115, 255, 255, 255), LINE = Color.argb(97, 255, 255, 255),
@@ -118,6 +118,8 @@ public final class Gamepad extends View {
     RectF pill(int b) { float w = K_PILL_W * u(), h = K_PILL_H * u(), cx = (safeL() + safeR()) / 2 + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u(), cy = safeT() + K_PILL_Y * u();
         return new RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2); }
     float swapCx() { return (safeL() + safeR()) / 2; } float swapCy() { return safeT() + K_PILL_Y * u(); }
+    // the menu button (back to the launcher), left of −: past the − pill's grown hit area, so the two never share a touch
+    float menuCx() { return swapCx() - (K_PILL_DX + K_PILL_W / 2 + 14 + K_SWAP_R) * u(); } float menuCy() { return swapCy(); }
     static float dist(float x0, float y0, float x1, float y1) { return (float)Math.hypot(x0 - x1, y0 - y1); }
     int btnAt(float x, float y) {
         for (int b : K_BTNS) {
@@ -131,6 +133,7 @@ public final class Gamepad extends View {
     }
     static RectF grow(RectF r, float d) { return new RectF(r.left - d, r.top - d, r.right + d, r.bottom + d); }
     boolean inSwap(float x, float y) { return dist(x, y, swapCx(), swapCy()) <= K_SWAP_R * u() * 1.6f; }
+    boolean inMenu(float x, float y) { return dist(x, y, menuCx(), menuCy()) <= K_SWAP_R * u() * 1.4f; }
     long faceAt(float x, float y) { long m = 0; float r = faceR() * 1.25f; for (int b = B_A; b <= B_Y; b++) if (dist(x, y, faceX(b), faceY(b)) <= r) m |= 1L << b; return m; }
     long dpadAt(float x, float y) {
         float dx = x - dpadCx(), dy = y - dpadCy();
@@ -151,13 +154,14 @@ public final class Gamepad extends View {
 
     // ---- Touch ----
     void recompute() {
-        long face = 0, btn = 0, dpad = 0; boolean swap = false;
+        long face = 0, btn = 0, dpad = 0; boolean swap = false, menu = false;
         for (int p = 0; p < 64; p++) if (down[p]) {
             int c = (int)(owner[p] & 0xff);
             if (c == C_FACE) face |= faceOf[p];
             else if (c == C_BTN) btn |= 1L << (owner[p] >> 8);
             else if (c == C_DPAD) dpad |= dpadAt(px[p], py[p]);
             else if (c == C_SWAP) swap = true;
+            else if (c == C_MENU) menu = true;
         }
         int[] ax = new int[4];
         for (int i = 0; i < 2; i++) {
@@ -168,9 +172,9 @@ public final class Gamepad extends View {
         }
         long pressed = (face | dpad | btn) & ~(faceBits | dpadBits | btnBits);
         int gripping = (stick[0] >= 0 ? 1 : 0) | (stick[1] >= 0 ? 2 : 0);
-        if (pressed != 0 || (swap && !swapHeld) || (gripping & ~hapticSticks) != 0) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        if (pressed != 0 || (swap && !swapHeld) || (menu && !menuHeld) || (gripping & ~hapticSticks) != 0) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
         hapticSticks = gripping;
-        faceBits = face; dpadBits = dpad; btnBits = btn; swapHeld = swap;
+        faceBits = face; dpadBits = dpad; btnBits = btn; swapHeld = swap; menuHeld = menu;
         nativeTouchPad(face | dpad | btn, ax[0], ax[1], ax[2], ax[3]);
         lastBtn = face | dpad | btn; lastAx = ax;
         invalidate();
@@ -189,7 +193,8 @@ public final class Gamepad extends View {
     void begin(int p, float x, float y) {
         down[p] = true; px[p] = x; py[p] = y; owner[p] = C_NONE; faceOf[p] = 0;
         boolean g = false;
-        if (padOff) g = gameBegin(p);
+        if (inMenu(x, y)) owner[p] = C_MENU;   // shown with a controller too (the pad hidden): the way back to the launcher
+        else if (padOff) g = gameBegin(p);
         else {
             int hit = tap ? -1 : btnAt(x, y);
             if (hit >= 0) owner[p] = C_BTN | (long)hit << 8;
@@ -219,6 +224,7 @@ public final class Gamepad extends View {
     boolean end(int p, boolean ended) {   // → the layout button was released on it
         if (!down[p]) return false;
         boolean swap = ended && (owner[p] & 0xff) == C_SWAP && inSwap(px[p], py[p]);
+        if (ended && (owner[p] & 0xff) == C_MENU && inMenu(px[p], py[p])) menuGo = true;   // released on it
         if ((owner[p] & 0xff) == C_GAME) game[(int)(owner[p] >> 8) & 15] = -1;
         for (int i = 0; i < 2; i++) if (stick[i] == p) stick[i] = -1;
         down[p] = false; owner[p] = 0; faceOf[p] = 0;
@@ -237,6 +243,7 @@ public final class Gamepad extends View {
         if (gameMoved) pushGame();
         recompute();
         if (swap) nextLayout();
+        if (menuGo) { menuGo = false; toLauncher(); }
         return true;
     }
     void nextLayout() {   // 2D → 3D (→ Tap in handheld mode) → 2D; every touch released first
@@ -305,6 +312,14 @@ public final class Gamepad extends View {
             }
             shape(c, circle(swapCx(), swapCy(), K_SWAP_R * u), swapHeld); label(c, tap ? "Tap" : full ? "3D" : "2D", swapCx(), swapCy(), 12 * u, swapHeld);
         }
+        shape(c, circle(menuCx(), menuCy(), K_SWAP_R * u), menuHeld); label(c, "≡", menuCx(), menuCy(), 18 * u, menuHeld);
+    }
+
+    // The launcher in front (the game's process keeps running behind it): Play there resumes this game, or asks before closing it for another (Launcher.java)
+    void toLauncher() {
+        Context a = getContext(); android.content.Intent i = new android.content.Intent(a, Launcher.class);
+        i.addFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        a.startActivity(i); nativeLog("gamepad: menu: back to the launcher");
     }
 
     // ---- Self-check (env.txt DM_PAD_TEST=1): touches made up and sent to this view (not to the screen), each control's result checked ----
