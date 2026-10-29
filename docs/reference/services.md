@@ -191,6 +191,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host reports add-on content from `DM_AOC_DIR`, one numbered folder per DLC index (title ID − base − 0x1000) holding that DLC's RomFS. `build_ipa_from_nsp.py` extracts the DLC NSPs in the folder with `nx_extract --aoc`, `build_ipa.sh` copies them to `<App>/aoc/`, and the app sets `DM_AOC_DIR`. `aoc::CountAddOnContent` / `ListAddOnContent` report those indices (`hle_misc.c`), and `fs::MountAddOnContent` mounts the folder read-only (`hle_fs.c`). D2R keeps its fixed `{1}` without `DM_AOC_DIR`; `DM_AOC_OWNED=0` reports none.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): its two DLC packages each hold one empty marker file (`e0`, `h0`), and the content is already in update 2.0.0. `DLCManager.RefreshHasList` marks a content owned when its mount succeeded (probe `main+0x29f3c88`).
 
+### DLC extracted for Android
+
+- **Symptom:** Android: a game with DLC in the NSP folder starts without it (The Binding of Isaac: Afterbirth+ instead of Repentance); the log has no `aoc: reporting … add-on contents` line.
+- **Cause:** `build_android_from_nsp.py` copied `<id>_build/aoc` to the phone and the front end sets `DM_AOC_DIR` from the game's `aoc/`, but nothing extracted the DLC for Android.
+- **Fix:** the Android build calls `build_ipa_from_nsp.py`'s `extract_aoc` after the game (one `<index>.img` per DLC, reused while the DLC NSPs are the same), passes the images to the shader split, and copies them to `files/games/<title ID>/aoc/`.
+- **Found on:** The Binding of Isaac: Afterbirth+ (010021C000B6A000): its Repentance DLC (010021C000B6B001, index 1) mounts as `aoc1` and the game starts as Repentance.
+
 ### Owned add-on content lists beyond 64 entries
 
 - **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.

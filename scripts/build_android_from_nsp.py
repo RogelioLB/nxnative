@@ -132,13 +132,13 @@ def button_font(work, logs, env):   # the Nintendo extension shared font's stand
     return font
 
 
-def build_shaders(sv, dirs, work, logs, env, g):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=()):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. None when there are none"""
     if not sv: return None
     sh = work / 'shader'
     own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
-    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own)   # its own stage
+    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, dlc_roms=dlc_roms)   # its own stage (a DLC's shaders too)
     except BuildError as e: bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
@@ -564,14 +564,18 @@ def main(argv):
         sv = g.words('shader_versions') or [pkg_ver]
         if not all(v in have for v in sv): say(f'[RED] the folder has no {", ".join(v for v in sv if v not in have)}, whose files the profile shader tables were made from: no shaders are translated'); sv = []
         picks = bi.pick_nsps(fam, have, sorted(set(sv) | {pkg_ver}, key=bi.vnum))
-        bi.PROG.plan(5 + 2 * bool(sv) + len(set(sv) - {pkg_ver}) + (not a.no_push))   # an extraction per other shader version
+        bi.PROG.plan(5 + 2 * bool(sv) + len(set(sv) - {pkg_ver}) + bool(fam['dlc']) + (not a.no_push))   # an extraction per other shader version, and the DLC's
         bi.PROG.stage('build nx_extract'); nx = build_nx_extract(work, logs, env); bi.PROG.end()
         b, u = picks[pkg_ver]
         game = bi.extract(nx, keys, ex, pkg_ver, b, u, None, logs, g)
         bad = bi.build_mismatch(game, pkg_ver, g)
         if bad: say(f'[RED] not the builds game profile {g.id} registers ({"; ".join(bad)}): the per-build fixes of the profile do not reach these modules, the game may not boot')
         g = bi.rewrite(sys.executable, REPO, game / 'ExeFS', patched, env, logs, g)
-        spv = build_shaders(sv, {v: (game if v == pkg_ver else bi.extract(nx, keys, ex, v, picks[v][0], picks[v][1], None, logs, g)) for v in sv}, work, logs, env, g)
+        # the DLC in the folder, as for iOS: <id>_build/aoc/<index>.img, which push_game copies to the game's aoc/ and the host mounts and reports as owned (DM_AOC_DIR).
+        # It was not extracted for Android: The Binding of Isaac's Repentance (DLC 010021C000B6B001) started as Afterbirth+
+        aoc = bi.extract_aoc(nx, keys, REPO, work, app, fam, logs)
+        dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
+        spv = build_shaders(sv, {v: (game if v == pkg_ver else bi.extract(nx, keys, ex, v, picks[v][0], picks[v][1], None, logs, g)) for v in sv}, work, logs, env, g, dlc_roms)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

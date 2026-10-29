@@ -18,7 +18,8 @@ a correct picture (the [README](../../README.md#status) has the list).
 | Packing | `scripts/build_android_from_nsp.py`, and the desktop app `scripts/nxnative_android.py` over it. A game without a profile is surveyed first and packed from a provisional profile (`--no-push`), then built and installed like any other |
 
 Tested on a POCO X5 5G (Snapdragon 695, Adreno 619, Android 14, 4 KiB pages): the self test and the sandbox checks pass in the app, and the host
-unit tests below pass over adb. Games run on it: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury and Danganronpa V3.
+unit tests below pass over adb. Games run on it: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury, Danganronpa V3 and The Binding of Isaac: Afterbirth+ with Repentance
+(its shaders compiled at run time and captured on the phone: [Run-time GLSLC outputs captured on the phone](../../docs/reference/shaders.md#run-time-glslc-outputs-captured-on-the-phone-android)).
 
 ## Games on the phone: the launcher
 

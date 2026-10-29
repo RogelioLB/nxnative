@@ -729,6 +729,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md): `subsdk0` is NVN's runtime GLSL compiler and `main` imports `glslcCompile*`, but up to the house, the beach and the menus every shader the game loaded was in the offline tables.
   - [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md) (the rule that a module must define `glslcCompile`): `main` imports `glslcCompile` and holds agl's GLSL sources, but no module defines it, so nothing is compiled at run time.
 
+### Run-time GLSLC outputs captured on the phone (Android)
+
+- **Symptom:** Android: the shader split finds no shaders (`shaders: 0`, `[RED] the game is packed without shaders`), the game runs (it answers input, a software keyboard opens) but draws nothing, and the log shows `no translated shader <key>`. With the capture on, `[RED] glslc: cannot write <path>` for every compile, or captures that `adb pull` refuses (`Permission denied`).
+- **Cause:** the game ships its GLSL sources and Nintendo's GLSLC (`subsdk0`) and compiles every shader at run time, so no game file holds an NVN shader to split, and shaders are translated offline only. On Android the capture (`hle_glslc.c`) made only the last folder of `DM_GLSLC_CAPTURE` (one `mkdir`, failing under a parent not made yet), and the app's umask left the folder and the files 0700 / 0600, out of adb's reach.
+- **Fix:** the capture makes every missing folder on the way and leaves the folder 0777 and each file 0666. On Android the capture runs on the phone instead of the Mac: `DM_GLSLC_CAPTURE=/sdcard/Android/data/org.nxnative.android/files/glslc_capture/<title ID>` in the app's `env.txt`, play the game (each shader is saved the first time it is compiled), `adb pull` the folder into `<NSP folder>/<id>_build/extract/<version>/glslc_capture`, and build again: the split reads the captures and the new ones are translated. A scene the game reaches later can compile more, so the loop is repeated until the log shows no `no translated shader`. Open: the loop is manual (the packing script could pull new captures on every install).
+- **Found on:** The Binding of Isaac: Afterbirth+ (010021C000B6A000, provisional profile, SDK 13, its code in an NRO): 24 GLSL sources in `AfterbirthPlus.nro` and 6 in the RomFS; 23 outputs at boot, 58 once its Repentance DLC loaded.
+
 ### GLSLC GPU code version against the driver's range
 
 - **Symptom:** a null read at `main+0x3316dc` in `nnMain`, right after the window setup (the program object's interface pointers at +0xd0 / +0xd8 both null).

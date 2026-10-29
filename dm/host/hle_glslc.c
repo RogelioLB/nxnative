@@ -9,7 +9,11 @@
 
 static void capture(const void *obj) {
     static const char *dir; static int init;
-    if (!init) { init = 1; dir = getenv("DM_GLSLC_CAPTURE"); if (dir) { mkdir(dir, 0755); LOG("glslc: run-time compile outputs are saved to %s", dir); } }
+    if (!init) { init = 1; dir = getenv("DM_GLSLC_CAPTURE");
+        if (dir) {   // every missing folder on the way (a capture folder under one not made yet: the one mkdir failed and so did every save; The Binding of Isaac on Android)
+            char p[1024]; snprintf(p, sizeof p, "%s", dir);
+            for (char *s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0777); *s = '/'; }
+            mkdir(p, 0777); chmod(p, 0777); LOG("glslc: run-time compile outputs are saved to %s", dir); } }
     if (!dir) return;
     const uint8_t *const *res = *(const uint8_t *const *const *)obj;
     if (!res || !res[0] || !res[1] || !res[0][0xc] || res[0][0xd]) return;
@@ -20,6 +24,7 @@ static void capture(const void *obj) {
     struct stat st; if (!stat(path, &st)) return;
     FILE *f = fopen(path, "wb"); if (!f) { LOG("[RED] glslc: cannot write %s", path); return; }
     fwrite(out, 1, n, f); fclose(f);
+    chmod(path, 0666);   // readable by others: an Android app's umask makes it 0600, and adb could not pull the captures to the computer
     LOG("glslc: saved a run-time compile output %s (%u bytes)", path, n);
 }
 

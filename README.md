@@ -40,6 +40,7 @@ Tested on a **POCO X5 5G** (Snapdragon 695, Adreno 619 GPU, Android 14). Other p
 | Super Mario Bros. Wonder 1.2.1 | Playable: about 30 fps in levels and on the world map at render scale 0.8 |
 | Super Mario 3D World + Bowser's Fury 1.2.2 | Bowser's Fury runs with correct colours; one launch stopped at a black loading screen (open, see the game's note) |
 | Danganronpa V3: Killing Harmony Anniversary Edition 1.0.2 | Boots, plays its opening movie and draws its picture, from a provisional (guessed) profile; not played through |
+| The Binding of Isaac: Afterbirth+ 1.7.9b with Repentance | Runs from a provisional profile, with its Repentance DLC; it compiles its shaders at run time, captured on the phone (58 so far, below) |
 
 Every other game in the [games table](dm/games/README.md#games) has a profile and can be packed the same way, but has not been run on Android. A game without a
 profile can still be packed as an *experimental build* (below): most likely it does not boot, but it is the starting point for porting it.
@@ -106,6 +107,19 @@ When a game shows a black or wrong picture, these files in `Android/data/org.nxn
 - `shot_now`: the next presented frame as a PNG in `dump/` (`DM_NVN_SHOT=<frame>[,<frame>...]:<path>` in `env.txt` does the same for given frames).
 - `dump_now`: every render target of one frame, after each pass, as `.raw` and `.png` in `dump/`, with each draw's shaders and bound textures in the log.
 - `threads_now`: every game thread's state, what it waits on and its backtrace, in the log (for a game that stops moving on).
+
+## Games that compile their shaders while they run
+
+Some games carry their shaders as GLSL source and compile them with Nintendo's GLSL compiler while they run (The Binding of Isaac does). Their files hold no shader to
+translate, so the first build has none (`[RED] the game is packed without shaders`): the game runs but draws nothing. The shaders are captured on the phone:
+
+1. Add `DM_GLSLC_CAPTURE=/sdcard/Android/data/org.nxnative.android/files/glslc_capture/<title ID>` to `Android/data/org.nxnative.android/files/env.txt`.
+2. Play the game for a while: each shader is saved the first time the game compiles it (`glslc: saved a run-time compile output` in the log).
+3. Copy them to the computer: `adb pull /sdcard/Android/data/org.nxnative.android/files/glslc_capture/<title ID>/. "<NSP folder>/<title ID>_build/extract/<version>/glslc_capture"`.
+4. Build and install again: the shader split reads the captures and translates the new ones.
+
+A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. DLC in the NSP folder is extracted and copied to the
+phone with the game.
 
 ## What the Android port changed
 
