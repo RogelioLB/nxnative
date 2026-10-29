@@ -585,7 +585,8 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
 static void pk_drop(const void *p);
 NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+// c1: each stage's c1 constant segment in its code area (control +0x700 start, +0x704 end), copied with the keys: the control section is gone after SetShaders
+typedef struct { uint8_t key[6][8]; uint8_t ok; uint32_t c1[6][2]; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -624,6 +625,12 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
+int prog_c1(const prog_t *p, unsigned st, uint32_t *start, uint32_t *end) {
+    prog_keys_t *k = st < p->nstage && st < 6 ? pk_get(p, 0) : NULL;
+    if (!k) return 0;
+    *start = k->c1[st][0]; *end = k->c1[st][1];
+    return 1;
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -636,6 +643,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     k->ok = 0;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        if (sd[i].control) memcpy(k->c1[i], (const uint8_t *)sd[i].control + 0x700, 8); else k->c1[i][0] = k->c1[i][1] = 0;
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);

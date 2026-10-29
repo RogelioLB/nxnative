@@ -242,6 +242,8 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+// the stage's c1 constant segment in its code area (control +0x700 / +0x704 as they were at SetShaders); 0 when the program has no record
+int prog_c1(const prog_t *p, unsigned stage, uint32_t *start, uint32_t *end);
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 // New serial (> 0, globally increasing)

@@ -326,6 +326,27 @@ def push_dir(serial, local, parent, name, log, sync=False):
         adb(serial, 'shell', 'rm', '-rf', f'{parent}/{name}'); adb(serial, 'shell', 'mv', f'{parent}/{local.name}', f'{parent}/{name}')
 
 
+# Shaders a game compiles at run time with its own GLSLC: the app saves each new one on the phone (front_android.c DM_GLSLC_CAPTURE: games/<title ID>/glslc_capture, or
+# glslc_capture/<title ID> where env.txt pointed it before), and every build or install of a game with a provisional profile pulls the ones this computer lacks into
+# <version dir>/glslc_capture, where the shader split reads them. A registered profile's tables name the captures they were made from, so its games are left as they are
+CAPTURE_DIRS = ('games/{id}/glslc_capture', 'glslc_capture/{id}')
+
+
+def pull_captures(serial, gid, dest, logs):   # → how many new captures were copied to dest
+    have = {f.name for f in dest.glob('*.glslc')} if dest.is_dir() else set()
+    new = 0
+    for rel in CAPTURE_DIRS:
+        d = f'{REMOTE}/{rel.format(id=gid)}'
+        names = [n.strip() for n in adb(serial, 'shell', f'ls {sh_quote(d)} 2>/dev/null', check=False).split() if re.fullmatch(r'[0-9a-f]{16}\.glslc', n.strip())]
+        for n in names:
+            if n in have: continue
+            dest.mkdir(parents=True, exist_ok=True)
+            adb(serial, 'pull', f'{d}/{n}', dest / n, log=logs / 'adb_pull_captures.log')
+            have.add(n); new += 1
+    if new: say(f'{new} new run-time shader(s) captured on the phone: copied to {dest}')
+    return new
+
+
 def open_tree(serial, d):
     # adb makes the folders as the shell user, drwxrws--- (group ext_data_rw): on Android 15 (a Galaxy S21 Ultra) the app could not enter them, found no game and ran its self test.
     # Opened to everyone; Android/data/<package> is reachable only by the app and the shell, so this gives no other app access
@@ -476,7 +497,8 @@ def info(nsp_dir):
                 out['extracted'][v] = {'icon': str(d / 'icon.jpg') if (d / 'icon.jpg').is_file() else None, 'name': nacp.name(d / 'control.nacp'),
                                        'display': nacp.version(d / 'control.nacp'), 'languages': nacp.languages(d / 'control.nacp'),
                                        'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None,
-                                       'built': (work / f'patched_android_{v}' / 'main.fixups.tsv').is_file()}
+                                       'built': (work / f'patched_android_{v}' / 'main.fixups.tsv').is_file(),
+                                       'captures': len(list((d / 'glslc_capture').glob('*.glslc')))}   # run-time shaders on this computer (pull_captures)
         h = library().get(g.id); out['host'] = h[1] if h else None
     return out
 
@@ -490,6 +512,7 @@ def main(argv):
     ap.add_argument('--sdk', help='the Android SDK (default ANDROID_HOME)'); ap.add_argument('--serial', help='the adb device (default: the only one)')
     ap.add_argument('--no-push', action='store_true', help='build the APK only; do not install it or copy the game files to the phone')
     ap.add_argument('--push-only', action='store_true', help='install the app and copy a game built before to the phone, without building')
+    ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
     ap.add_argument('--title', help='the title ID for --migrate')
@@ -553,12 +576,30 @@ def main(argv):
     ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
     patched = work / f'patched_android_{pkg_ver}'
-    if a.push_only:   # what an earlier build left: the extraction, the rewrite, the shaders, the font and the host in the library
+    prov = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # its captures are pulled (pull_captures)
+    serial = None if a.no_push else a.serial or os.environ.get('ANDROID_SERIAL')
+    if not a.no_push and not serial:   # the phone now (its captures are pulled before the shader stages); none connected fails at the install, as before, unless only the phone is wanted
+        try: serial = pick_device()
+        except BuildError:
+            if a.push_only or a.update_shaders: raise
+    capture_dir = ex / pkg_ver / 'glslc_capture'
+    if a.push_only or a.update_shaders:   # what an earlier build left: the extraction, the rewrite, the shaders, the font and the host in the library
         game, spv, font = ex / pkg_ver, work / 'spv', work / 'font'
         need = [p for p in (game / 'control.nacp', patched / 'main.fixups.tsv', font) if not p.exists()]
         if need or g.id not in library(): raise BuildError(f'{g.id} {pkg_ver} was not built on this computer yet ({", ".join(map(str, need)) or "no host in the library"}): build it first')
         if not spv.is_dir(): spv = None
-        bi.PROG.plan(3)
+        new = pull_captures(serial, g.id, capture_dir, logs) if prov else 0
+        if a.update_shaders and not prov: say('a registered profile: its shader tables name the captures they were made from, nothing is pulled')
+        bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
+        if new:   # the split again with the new captures, and the new ones translated (the others are kept)
+            aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
+            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms) or spv
+        if a.update_shaders:
+            if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
+            bi.PROG.stage('copy the shaders to the phone'); dst = f'{REMOTE}/games/{g.id}'
+            adb(serial, 'shell', 'am', 'force-stop', PKG)   # the game reads its shaders when it starts
+            if spv: push_dir(serial, spv, dst, 'spv', logs / 'adb_push_spv.log', sync=True); open_tree(serial, f'{dst}/spv')
+            bi.PROG.end(f'{dst}/spv'); say('done: open the game again on the phone'); return
     else:
         # the shaders are split from every version the profile's shader tables were made from (shader_versions), as the iOS build does
         sv = g.words('shader_versions') or [pkg_ver]
@@ -574,6 +615,7 @@ def main(argv):
         # the DLC in the folder, as for iOS: <id>_build/aoc/<index>.img, which push_game copies to the game's aoc/ and the host mounts and reports as owned (DM_AOC_DIR).
         # It was not extracted for Android: The Binding of Isaac's Repentance (DLC 010021C000B6B001) started as Afterbirth+
         aoc = bi.extract_aoc(nx, keys, REPO, work, app, fam, logs)
+        if prov and serial: pull_captures(serial, g.id, capture_dir, logs)
         dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
         spv = build_shaders(sv, {v: (game if v == pkg_ver else bi.extract(nx, keys, ex, v, picks[v][0], picks[v][1], None, logs, g)) for v in sv}, work, logs, env, g, dlc_roms)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
@@ -588,7 +630,7 @@ def main(argv):
     if a.no_push:
         say(f'done: {apk}. On the phone: install it, then copy {patched} to {REMOTE}/games/{g.id}/code and {bi.rfs.source(game)} to {REMOTE}/games/{g.id}/'); return
     bi.PROG.stage('install and copy to the phone')
-    serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
+    serial = serial or pick_device()
     bi.PROG.set(step='installing the app (an update: its data stays)'); install(serial, apk, logs)
     adb(serial, 'shell', 'am', 'force-stop', PKG)
     rom = bi.rfs.source(game)

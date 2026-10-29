@@ -111,15 +111,16 @@ When a game shows a black or wrong picture, these files in `Android/data/org.nxn
 ## Games that compile their shaders while they run
 
 Some games carry their shaders as GLSL source and compile them with Nintendo's GLSL compiler while they run (The Binding of Isaac does). Their files hold no shader to
-translate, so the first build has none (`[RED] the game is packed without shaders`): the game runs but draws nothing. The shaders are captured on the phone:
+translate, so the first build has none (`[RED] the game is packed without shaders`): the game runs but draws nothing. The app captures them on the phone by itself:
 
-1. Add `DM_GLSLC_CAPTURE=/sdcard/Android/data/org.nxnative.android/files/glslc_capture/<title ID>` to `Android/data/org.nxnative.android/files/env.txt`.
-2. Play the game for a while: each shader is saved the first time the game compiles it (`glslc: saved a run-time compile output` in the log).
-3. Copy them to the computer: `adb pull /sdcard/Android/data/org.nxnative.android/files/glslc_capture/<title ID>/. "<NSP folder>/<title ID>_build/extract/<version>/glslc_capture"`.
-4. Build and install again: the shader split reads the captures and translates the new ones.
+1. Play the game for a while: each shader is saved the first time the game compiles it (in the game's folder on the phone, `glslc_capture/`).
+2. On the computer, the game's card in the desktop app says how many new shaders the phone has; **Manage → Update shaders from the phone** copies them, translates
+   the new ones and puts them on the phone (no app build: about a minute). From the command line: `build_android_from_nsp.py "<NSP folder>" -k <prod.keys> --update-shaders`.
+   Every build and **Install on phone** also picks up the new ones first.
+3. Open the game again.
 
-A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. DLC in the NSP folder is extracted and copied to the
-phone with the game.
+A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
+profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
 
 ## What the Android port changed
 

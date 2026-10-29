@@ -642,7 +642,13 @@ static struct { int active; VkRenderPass rp; rp_key key; uint32_t w, h; VkFrameb
 static uint64_t g_passes;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
 // $DM_DUMP_DIR/f<frame>_p<pass>_a<attachment>_<w>x<h>_vk<format>_s<serial>.raw once the frame is presented, with a log line per draw (shaders, viewport, textures)
-typedef struct { stg_t s; uint32_t w, h; VkFormat f; int pass, att; uint64_t ser; } dump_t;
+typedef struct { stg_t s; uint32_t w, h; VkFormat f; int pass, att; uint64_t ser; } dump_t;   // att < 0: a texture the pass's draws read
+static int dump_bytes(VkFormat f) {   // the texel size of what the dump copies: fmt_bytes', and the 16-bit packed formats (a movie's RGB565 picture)
+    int b = fmt_bytes(f); if (b) return b;
+    switch (f) { case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16: case VK_FORMAT_R4G4B4A4_UNORM_PACK16: case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_R5G5B5A1_UNORM_PACK16: return 2; default: return 0; }
+}
+static uint64_t g_dump_tex[32]; static int g_ndump_tex;   // the textures this pass's draws read (dump_note_tex), copied at its end with the targets
+static void dump_note_tex(uint64_t ser) { for (int i = 0; i < g_ndump_tex; i++) if (g_dump_tex[i] == ser) return; if (g_ndump_tex < 32) g_dump_tex[g_ndump_tex++] = ser; }
 static dump_t g_dumps[512]; static int g_ndump, g_dump_pass;
 // or a file named dump_now in $DM_DUMP_DIR's parent: the frame two presents after it is seen (checked every 30 presents; the file is removed)
 static long g_dump_at = -2;
@@ -657,7 +663,7 @@ static void dump_pass_end(void) {
     g_dump_pass++;
     for (int i = 0; i < 8; i++) {
         vtex *v = P.cv[i]; if (!v || g_ndump >= (int)(sizeof g_dumps / sizeof *g_dumps)) continue;
-        int bpp = fmt_bytes(v->fmt); if (!bpp) { LOG("[dump] pass %d att %d: format %d not dumped", g_dump_pass, i, v->fmt); continue; }
+        int bpp = dump_bytes(v->fmt); if (!bpp) { LOG("[dump] pass %d att %d: format %d not dumped", g_dump_pass, i, v->fmt); continue; }
         uint32_t w = v->w >> P.clv[i] ? v->w >> P.clv[i] : 1, h = v->h >> P.clv[i] ? v->h >> P.clv[i] : 1;
         dump_t *d = &g_dumps[g_ndump]; if (!stg_new(&d->s, (VkDeviceSize)w * h * bpp)) continue;
         d->w = w; d->h = h; d->f = v->fmt; d->pass = g_dump_pass; d->att = i; d->ser = v->serial; g_ndump++;
@@ -668,14 +674,26 @@ static void dump_pass_end(void) {
         vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, d->s.b, 1, &r);
         vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     }
+    for (int i = 0; i < g_ndump_tex; i++) {   // level 0, layer 0 of each texture the draws read (colour, uncompressed): f<frame>_p<pass>_t_<w>x<h>_vk<format>_s<serial>
+        vtex *v = nvn_hm_get(&g_tex, &g_dump_tex[i]); int bpp = v ? dump_bytes(v->fmt) : 0;
+        if (!bpp || v->aspect != VK_IMAGE_ASPECT_COLOR_BIT || v->samples > 1 || g_ndump >= (int)(sizeof g_dumps / sizeof *g_dumps)) continue;
+        dump_t *d = &g_dumps[g_ndump]; if (!stg_new(&d->s, (VkDeviceSize)v->w * v->h * bpp)) continue;
+        d->w = v->w; d->h = v->h; d->f = v->fmt; d->pass = g_dump_pass; d->att = -1; d->ser = v->serial; g_ndump++;
+        VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        VkBufferImageCopy r = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {v->w, v->h, 1}};
+        vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, d->s.b, 1, &r);
+    }
+    g_ndump_tex = 0;
 }
 static void dump_write(void) {   // after the dumped frame's commands completed
     const char *dir = getenv("DM_DUMP_DIR"); if (!dir) dir = ".";
     for (int i = 0; i < g_ndump; i++) {
         dump_t *d = &g_dumps[i]; char path[700];
-        snprintf(path, sizeof path, "%s/f%ld_p%03d_a%d_%ux%u_vk%d_s%llu.raw", dir, dump_frame(), d->pass, d->att, d->w, d->h, d->f, (unsigned long long)d->ser);
+        if (d->att < 0) snprintf(path, sizeof path, "%s/f%ld_p%03d_t_%ux%u_vk%d_s%llu.raw", dir, dump_frame(), d->pass, d->w, d->h, d->f, (unsigned long long)d->ser);
+        else snprintf(path, sizeof path, "%s/f%ld_p%03d_a%d_%ux%u_vk%d_s%llu.raw", dir, dump_frame(), d->pass, d->att, d->w, d->h, d->f, (unsigned long long)d->ser);
         FILE *fp = fopen(path, "wb"); if (fp) { fwrite(d->s.p, 1, (size_t)d->s.n, fp); fclose(fp); }
-        memcpy(path + strlen(path) - 4, ".png", 4); png_texels(path, d->f, fmt_bytes(d->f), d->s.p, d->w, 0, 0, d->w, d->h, 0);   // beside the raw texels, in the formats gfx_vk.c px_rgb converts
+        memcpy(path + strlen(path) - 4, ".png", 4); png_texels(path, d->f, dump_bytes(d->f), d->s.p, d->w, 0, 0, d->w, d->h, 0);   // beside the raw texels, in the formats gfx_vk.c px_rgb converts
         stg_free(&d->s);
     }
     LOG("[dump] frame %ld: %d targets written to %s", dump_frame(), g_ndump, dir); g_ndump = 0;
@@ -1300,10 +1318,9 @@ static int stage_set(vshader *s, VkDescriptorSet set, const prog_t *pr, int prog
         int slot = s->cb[i].slot; size_t n = 16; const void *src = NULL; uint8_t bank[0xA00];
         if (slot == 0) { bank_c0(nst, bank, base_inst); src = bank; n = 0x800; }
         else if (slot == 2) { src = c2; n = 0xA00; }
-        else if (slot == 1) {   // the shader's own constant segment, in its code memory (control +0x700: its offset in the code, +0x704: the code's length)
+        else if (slot == 1) {   // the shader's own constant segment, in its code memory: its bounds were read from the control section at SetShaders (gone by now: Danganronpa V3's movie shader read zeros)
             const NVNshaderData *sd = pr && prog_stage >= 0 ? &pr->sd[prog_stage] : NULL; uint32_t o = 0, e = 0;
-            if (sd && sd->control) { memcpy(&o, (const uint8_t *)sd->control + 0x700, 4); memcpy(&e, (const uint8_t *)sd->control + 0x704, 4); }
-            if (sd && sd->data && e > o && e - o <= 0x10000) { src = (const void *)(uintptr_t)(sd->data + o); n = e - o; }
+            if (sd && sd->data && prog_c1(pr, (unsigned)prog_stage, &o, &e) && e > o && e - o <= 0x10000) { src = (const void *)(uintptr_t)(sd->data + o); n = e - o; }
         } else if (slot >= 3 && slot - 3 < 16) { const p_bind_buf *u = &D.ubo[nst][slot - 3];
             if (u->addr && u->size) { src = (const void *)(uintptr_t)u->addr; n = u->size > 0x10000 ? 0x10000 : (size_t)u->size;
                 size_t rd = s->cb[i].ext && n > s->cb[i].ext ? s->cb[i].ext : n;   // in a memory pool still, as storage buffers below (else it reads 0)
@@ -1378,7 +1395,7 @@ static int stage_set(vshader *s, VkDescriptorSet set, const prog_t *pr, int prog
             if (!iv) iv = ms ? dummy_ms((t->type & 0x400) != 0) : dummy_view(vt);
             if (!iv) { g_bind_bad = 1; RED_ONCE(113, "no stand-in for an unbound multisample slot on this GPU: skipped"); iv = dummy_view(vt); }
             const samp_par *sp = sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? &g_sreg[sid] : NULL;
-            if (dump_on() && e < 4) { const vtex *dv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL;
+            if (dump_on() && e < 4) { const vtex *dv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL; if (dv) dump_note_tex(dv->serial);
                 LOG("[dump]   %s binding %d[%d] type %#x tid %d sid %d -> %s s%llu %ux%ux%u layers %u levels %u vk%d pkg %d", s->key, t->binding, e, t->type, tid, sid, dv ? "tex" : "none",
                     dv ? (unsigned long long)dv->serial : 0ull, dv ? dv->w : 0, dv ? dv->h : 0, dv ? dv->d : 0, dv ? dv->layers : 0, dv ? dv->levels : 0, dv ? dv->fmt : 0, dv ? dv->pkg : 0); }
             ii[nii + e] = (VkDescriptorImageInfo){samp_get(sp, (t->type & 0x400) != 0), iv, VK_IMAGE_LAYOUT_GENERAL};

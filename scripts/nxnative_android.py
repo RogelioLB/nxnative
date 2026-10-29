@@ -164,7 +164,7 @@ def journal_title(argv):   # what a build from the console does, from its comman
     if folder:
         try: name = next((m.get('name') for _, (_, m) in ba.library().items() if m.get('nsp_dir') == str(Path(folder).resolve())), None)
         except Exception: pass
-    return ('Install ' if '--push-only' in argv else 'Build ') + (name or (Path(folder).name if folder else 'a game'))
+    return ('Update the shaders of ' if '--update-shaders' in argv else 'Install ' if '--push-only' in argv else 'Build ') + (name or (Path(folder).name if folder else 'a game'))
 
 
 def label(text, name=None, wrap=False):
@@ -202,14 +202,19 @@ class Game:
         ex = info.get('extracted') or {}; self.newest = info.get('newest')
         e = ex.get(self.newest) or (next(iter(ex.values())) if ex else {})
         self.id = info.get('title_id'); self.name = e.get('name') or info.get('name') or self.id or Path(folder).name; self.error = info.get('error')
+        self.captures = e.get('captures') or 0
         self.icon = e.get('icon'); self.display = e.get('display'); self.languages = e.get('languages') or [c for c, _ in LANGUAGES]
         self.profile = info.get('profile'); self.provisional = info.get('provisional'); self.host = info.get('host'); self.tested = info.get('android_tested')
         self.pm = QPixmap(self.icon) if self.icon else QPixmap()
 
+    def new_shaders(self, on_phone):   # run-time shaders the phone saved beyond the ones on this computer (a provisional profile's only: build_android_from_nsp.py pull_captures)
+        return max(0, (on_phone.get(self.id) or {}).get('captures', 0) - self.captures) if self.provisional else 0
     def status(self, on_phone, phone):   # (text, colour, state): state picks what Play does
         if self.error: return f'Could not read the folder: {self.error}', ERR, 'none'
         if not self.profile: return 'No profile: experimental build only', ERR, 'survey'
         x = 'Experimental (provisional profile, may not boot) · ' if self.provisional else ''   # an experimental build's profile, guessed from the survey
+        n = self.new_shaders(on_phone)
+        if n and self.host: return f'{x}{n} new shader(s) captured on the phone · Manage → Update shaders', BUILD, 'install' if self.id not in on_phone else 'play'
         if self.id in on_phone and self.host: return f'{x}Ready on {phone or "the phone"}', ERR if x else READY, 'play'
         if self.host: return f'{x}Built · not on this phone', ERR if x else BUILD, 'install'
         return f'{x}Not built yet', ERR if x else TEXT3, 'build'
@@ -451,6 +456,8 @@ class LibraryPage(QWidget):
         act('Build and install', lambda: self.run(g, [], 'Build'), bool(g.profile and s))
         act('Build only', lambda: self.run(g, ['--no-push'], 'Build'), bool(g.profile))
         act('Install on phone (no build)', lambda: self.run(g, ['--push-only'], 'Install'), bool(g.profile and g.host and s))
+        n = g.new_shaders(self.win.phone_games)
+        act(f'Update shaders from the phone ({n} new)' if n else 'Update shaders from the phone', lambda: self.run(g, ['--update-shaders'], 'Update shaders'), bool(g.provisional and g.host and s))
         self.menu.addSeparator()
         act('Update the app on the phone', lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
         act('Remove from the phone…', lambda: self.win.phones.remove_game(g.id, g.name), bool(s and g.id in self.win.phone_games))
@@ -910,15 +917,16 @@ class Window(QMainWindow):
         if not s: self.phone_games = {}; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
         def look():
             _, pkg = adb_run(s, 'shell', f'dumpsys package {PKG} | grep -E "lastUpdateTime|versionName" | head -2')
-            _, ls = adb_run(s, 'shell', f'for d in {REMOTE}/games/*/; do [ -f "$d/code/main.fixups.tsv" ] || continue; echo "@$d"; cat "$d/game.json" 2>/dev/null | tr -d "\\n"; echo; done; '
+            _, ls = adb_run(s, 'shell', f'for d in {REMOTE}/games/*/; do [ -f "$d/code/main.fixups.tsv" ] || continue; echo "@$d"; cat "$d/game.json" 2>/dev/null | tr -d "\\n"; echo; echo "#$(ls "$d/glslc_capture" 2>/dev/null | wc -l)"; done; '
                                         f'[ -f {REMOTE}/game/code/main.fixups.tsv ] && echo LEGACY')
             games, legacy, cur = {}, False, None
             for l in ls.splitlines():
                 if l == 'LEGACY': legacy = True
                 elif l.startswith('@'): cur = l[1:].rstrip('/').rsplit('/', 1)[-1].upper(); games[cur] = {}
                 elif cur and l.strip().startswith('{'):
-                    try: games[cur] = json.loads(l)
+                    try: games[cur] = dict(json.loads(l), **{k: v for k, v in games[cur].items() if k == 'captures'})
                     except ValueError: pass
+                elif cur and l.startswith('#') and l[1:].strip().isdigit(): games[cur]['captures'] = int(l[1:])   # run-time shaders the game saved on the phone
             return pkg, games, legacy
         def got(r):
             if isinstance(r, Exception): return

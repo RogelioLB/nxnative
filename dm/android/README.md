@@ -5,6 +5,8 @@ for Android (bionic, arm64-v8a) with stand-ins for the Darwin interfaces they ca
 SPIR-V when the game is packed) and runs compute and transform feedback; tessellation is missing, as on the Mac and iOS (see Status). Super Mario Bros. Wonder plays; Bowser's Fury and Danganronpa V3 (from a provisional profile) run with
 a correct picture (the [README](../../README.md#status) has the list).
 
+Translating shaders on the phone, at the moment a game uses them (instead of before packing): [plan_on_device_shaders.md](plan_on_device_shaders.md).
+
 ## Status
 
 | Part | State |

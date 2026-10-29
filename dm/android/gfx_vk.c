@@ -1066,16 +1066,18 @@ static int png_write(const char *path, const uint8_t *rgb, uint32_t w, uint32_t 
 static float uf_f(uint32_t bits, int mb) { uint32_t e = bits >> mb, m = bits & ((1u << mb) - 1); return e == 31 ? 1.0f : e ? ldexpf((float)(m | 1u << mb), (int)e - 15 - mb) : ldexpf((float)m, -14 - mb); }   // B10G11R11's unsigned floats (5-bit exponent)
 static uint8_t f_u8(float v) { return v <= 0 || v != v ? 0 : v >= 1 ? 255 : (uint8_t)(v * 255.0f + 0.5f); }
 static int px_rgb(VkFormat f, const uint8_t *s, uint8_t *o) {   // one texel → 8-bit RGB (float formats clamped to [0, 1], no tone mapping); 0: format not converted
-    uint32_t u; memcpy(&u, s, 4);
+    uint32_t u = 0; uint16_t c16 = 0;   // read only as wide as the format: the last texel of a staging buffer has no bytes after it
     switch (f) {
     case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_A8B8G8R8_UNORM_PACK32: case VK_FORMAT_A8B8G8R8_SRGB_PACK32: o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; return 1;
     case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: o[0] = s[2]; o[1] = s[1]; o[2] = s[0]; return 1;
-    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: o[0] = (uint8_t)((u & 1023) >> 2); o[1] = (uint8_t)((u >> 10 & 1023) >> 2); o[2] = (uint8_t)((u >> 20 & 1023) >> 2); return 1;
-    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: o[0] = f_u8(uf_f(u & 2047, 6)); o[1] = f_u8(uf_f(u >> 11 & 2047, 6)); o[2] = f_u8(uf_f(u >> 22, 5)); return 1;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: memcpy(&u, s, 4); o[0] = (uint8_t)((u & 1023) >> 2); o[1] = (uint8_t)((u >> 10 & 1023) >> 2); o[2] = (uint8_t)((u >> 20 & 1023) >> 2); return 1;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: memcpy(&u, s, 4); o[0] = f_u8(uf_f(u & 2047, 6)); o[1] = f_u8(uf_f(u >> 11 & 2047, 6)); o[2] = f_u8(uf_f(u >> 22, 5)); return 1;
     case VK_FORMAT_R16G16B16A16_SFLOAT: { uint16_t c[3]; memcpy(c, s, 6); for (int i = 0; i < 3; i++) o[i] = f_u8(half_f(c[i])); return 1; }
     case VK_FORMAT_R32G32B32A32_SFLOAT: { float c[3]; memcpy(c, s, 12); for (int i = 0; i < 3; i++) o[i] = f_u8(c[i]); return 1; }
     case VK_FORMAT_R8_UNORM: o[0] = o[1] = o[2] = s[0]; return 1;
-    case VK_FORMAT_R16_SFLOAT: o[0] = o[1] = o[2] = f_u8(half_f((uint16_t)u)); return 1;
+    case VK_FORMAT_R8G8_UNORM: o[0] = s[0]; o[1] = s[1]; o[2] = 0; return 1;
+    case VK_FORMAT_R5G6B5_UNORM_PACK16: { uint16_t c; memcpy(&c, s, 2); o[0] = (uint8_t)((c >> 11) * 255 / 31); o[1] = (uint8_t)((c >> 5 & 63) * 255 / 63); o[2] = (uint8_t)((c & 31) * 255 / 31); return 1; }
+    case VK_FORMAT_R16_SFLOAT: memcpy(&c16, s, 2); o[0] = o[1] = o[2] = f_u8(half_f(c16)); return 1;
     case VK_FORMAT_R32_SFLOAT: { float c; memcpy(&c, s, 4); o[0] = o[1] = o[2] = f_u8(c); return 1; }
     default: return 0;
     }

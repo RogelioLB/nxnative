@@ -985,3 +985,10 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Cause:** the game renders the LUT a slice at a time, each slice a render target (the view's layer is the depth slice). `view_get` made any view of a 3D image a 3D view of the whole volume, and reset the slice to 0: Vulkan takes only 2D views as attachments, and every slice was drawn over the first.
 - **Fix:** 3D images that can be colour attachments are created `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` (`gfx_vk.c`), and `rp_start` asks `view_get` (`g_view_slice`) for a 2D view of the target's slice (`gfx_vk_draw.inc`). The pass dump copies such a slice by its depth offset. Open: a clear outside a render pass (`vkCmdClearColorImage`) still clears every slice of a 3D image.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (Bowser's Fury), on a POCO X5 5G (Adreno 619).
+
+### A shader's own constants (c1) read after the control section is gone
+
+- **Symptom:** Android only: a movie plays black (its sound runs) and the game's picture is fine before and after it; in a pass dump the decoded luma and chroma planes hold the picture, but the YUV-to-RGB pass that reads them writes all zero.
+- **Cause:** the conversion shader takes its colour matrix from c1, the constant segment in its own code area, whose bounds are in the control section (+0x700 start, +0x704 end). The control section is only guaranteed valid during `nvnProgramSetShaders`, which is why the keys are computed there; the Android replay read the bounds again at each draw, when the game had already reused that memory (0..0), so c1 was not bound and read 0. The Mac takes c1 from the shader's reflection instead.
+- **Fix:** `nvnProgramSetShaders` keeps each stage's c1 bounds beside its keys, and `stage_set` (`gfx_vk_draw.inc`) takes them with `prog_c1` (`hle_nvn.c`).
+- **Found on:** Danganronpa V3: Killing Harmony Anniversary Edition (010063F014176000, provisional profile, Unity, SDK 10), its H.264 movies, on a POCO X5 5G (Adreno 619).
